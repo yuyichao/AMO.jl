@@ -2,3 +2,4 @@
 
 include("math.jl")
 include("rand.jl")
+include("atomic.jl")
