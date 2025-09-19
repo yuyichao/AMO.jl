@@ -26,6 +26,10 @@ end
 
 @testset "Laguerre" begin
     @test M.assoc_laguerre(1.0, -1, 0.0) == 0
+    @test M.assoc_laguerre(NaN, -1, NaN) == 0
+    @test M.assoc_laguerre(NaN, 0, NaN) == 1
+    @test isnan(M.assoc_laguerre(NaN, 1, 0.0))
+    @test isnan(M.assoc_laguerre(0.0, 1, NaN))
 
     test_assoc_laguerre(0.0, 0.0, 10)
 
