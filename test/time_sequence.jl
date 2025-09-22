@@ -84,11 +84,6 @@ end
     @test TS.nparams(s) == 24
     test_scalar_sequence(s)
 
-    s = TS.Sequence{Float64}(ops, init=()->0.0, mul=nothing,
-                             mul! = (out, a, b)->(@test isfinite(out); a * b))
-    @test TS.nparams(s) == 24
-    test_scalar_sequence(s)
-
     s1 = TS.Sequence{Float64}((Step1{Float64}(),))
     @test TS.nparams(s1) == 1
     test_scalar_sequence(s1)

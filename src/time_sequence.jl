@@ -25,9 +25,9 @@ function set_params! end
 (nparams(::Type{T} where T<:AbstractStep{OP,NParams}) where {OP,NParams}) = NParams
 (nparams(::AbstractStep{OP,NParams}) where {OP,NParams}) = NParams
 
-default_init(T) = nothing
-default_mul(T) = *
-default_mul!(T) = nothing
+get_init(T) = nothing
+get_mul(T) = *
+get_mul!(T) = nothing
 
 _fill_cb(ary, cb) = for i in eachindex(ary)
     ary[i] = cb()
@@ -43,8 +43,8 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,NSteps1,Mul
     mul::Mul
     mul!::Mul!
 
-    function Sequence{OP}(steps::Steps; @specialize(init=default_init(OP)),
-                          mul::Mul=default_mul(OP), mul!::(Mul!)=default_mul!(OP)) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Mul,Mul!}
+    function Sequence{OP}(steps::Steps; @specialize(init=get_init(OP)),
+                          mul::Mul=get_mul(OP), mul!::(Mul!)=get_mul!(OP)) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Mul,Mul!}
         @assert NSteps > 0
         if mul! !== nothing
             @assert init !== nothing
@@ -129,8 +129,27 @@ macro pick_mul(mul!, mul, out, a, b)
         if $mul! === nothing
             $mul($a, $b)
         else
-            $mul!($out, $a, $b)
+            v = $out
+            $mul!(v, $a, $b)
+            v
         end
+    end
+end
+
+macro pick_mulass(mul!, mul, out, a, b)
+    mul! = esc(mul!)
+    mul = esc(mul)
+    out = esc(out)
+    a = esc(a)
+    b = esc(b)
+    quote
+        if $mul! === nothing
+            v = $mul($a, $b)
+            $out = v
+        else
+            v = $mul!($out, $a, $b)
+        end
+        v
     end
 end
 
@@ -144,8 +163,8 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
     @inline _eval_compute(s, grads)
     @inbounds s.prefix_buff[1] = prev = s.val_buff[1]
     @inbounds for i in 2:NSteps - 1
-        s.prefix_buff[i] = prev = @pick_mul(mul!, mul, s.prefix_buff[i],
-                                            prev, s.val_buff[i])
+        prev = @pick_mulass(mul!, mul, s.prefix_buff[i],
+                            prev, s.val_buff[i])
     end
     last_val = @inbounds s.val_buff[NSteps]
     res = @inbounds @pick_mul(mul!, mul, s.tmp_buff[1], prev, last_val)
@@ -155,8 +174,8 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
     @assert length(grads) == NParams
     @inbounds s.suffix_buff[NSteps - 1] = prev = last_val
     @inbounds for i in NSteps - 2:-1:1
-        s.suffix_buff[i] = prev = @pick_mul(mul!, mul, s.suffix_buff[i],
-                                            s.val_buff[i + 1], prev)
+        prev = @pick_mulass(mul!, mul, s.suffix_buff[i],
+                            s.val_buff[i + 1], prev)
     end
     @inbounds for step_idx in 1:NSteps
         pstart = starts[step_idx]
@@ -164,21 +183,19 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
         if step_idx == 1
             suffix = s.suffix_buff[step_idx]
             for param_idx in pstart:pend
-                grads[param_idx] = @pick_mul(mul!, mul, grads[param_idx],
-                                             s.grad_buff[param_idx], suffix)
+                @pick_mulass(mul!, mul, grads[param_idx], s.grad_buff[param_idx], suffix)
             end
         elseif step_idx == NSteps
             prefix = s.prefix_buff[step_idx - 1]
             for param_idx in pstart:pend
-                grads[param_idx] = @pick_mul(mul!, mul, grads[param_idx],
-                                             prefix, s.grad_buff[param_idx])
+                @pick_mulass(mul!, mul, grads[param_idx], prefix, s.grad_buff[param_idx])
             end
         else
             prefix = s.prefix_buff[step_idx - 1]
             suffix = s.suffix_buff[step_idx]
             for param_idx in pstart:pend
                 tmp = @pick_mul(mul!, mul, s.tmp_buff[2], prefix, s.grad_buff[param_idx])
-                grads[param_idx] = @pick_mul(mul!, mul, grads[param_idx], tmp, suffix)
+                @pick_mulass(mul!, mul, grads[param_idx], tmp, suffix)
             end
         end
     end
