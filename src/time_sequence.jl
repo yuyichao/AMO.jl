@@ -51,21 +51,21 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,ValBuf,Grad
         NParams = sum(nparams, steps)
         tmp_buf = nothing
         if init !== nothing
-            val_buf = MVector(ntuple(_->init()::OP, NSteps))
-            grad_buf = MVector(ntuple(_->init()::OP, NParams))
-            prefix_buf = MVector(ntuple(_->init()::OP, NSteps - 1))
-            suffix_buf = MVector(ntuple(_->init()::OP, NSteps - 1))
+            val_buf = [init()::OP for _ in 1:NSteps]
+            grad_buf = [init()::OP for _ in 1:NParams]
+            prefix_buf = NSteps <= 2 ? nothing : MVector(ntuple(_->init()::OP, NSteps - 2))
+            suffix_buf = NSteps <= 2 ? nothing : MVector(ntuple(_->init()::OP, NSteps - 2))
             tmp_buf = MVector(ntuple(_->init()::OP, 2))
         elseif isbitstype(OP)
             val_buf = MVector{NSteps,OP}(undef)
             grad_buf = MVector{NParams,OP}(undef)
-            prefix_buf = MVector{NSteps - 1,OP}(undef)
-            suffix_buf = MVector{NSteps - 1,OP}(undef)
+            prefix_buf = NSteps <= 2 ? nothing : MVector{NSteps - 2,OP}(undef)
+            suffix_buf = NSteps <= 2 ? nothing : MVector{NSteps - 2,OP}(undef)
         else
             val_buf = Vector{OP}(undef, NSteps)
             grad_buf = Vector{OP}(undef, NParams)
-            prefix_buf = Vector{OP}(undef, NSteps - 1)
-            suffix_buf = Vector{OP}(undef, NSteps - 1)
+            prefix_buf = NSteps <= 2 ? nothing : Vector{OP}(undef, NSteps - 2)
+            suffix_buf = NSteps <= 2 ? nothing : Vector{OP}(undef, NSteps - 2)
         end
         s = new{OP,NSteps,Steps,NParams,typeof(val_buf),typeof(grad_buf),
                 typeof(prefix_buf),typeof(tmp_buf),Mul,Mul!}(
@@ -156,7 +156,8 @@ macro pick_mulass(mul!, mul, out, a, b)
             v = $mul($a, $b)
             $out = v
         else
-            v = $mul!($out, $a, $b)
+            v = $out
+            $mul!(v, $a, $b)
         end
         v
     end
@@ -170,38 +171,39 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
     mul! = s.mul!
     starts, ends = _param_range(typeof(s))
     @inline _eval_compute(s, grads)
-    @inbounds s.prefix_buf[1] = prev = s.val_buf[1]
+    first_val = @inbounds s.val_buf[1]
+    last_val = @inbounds s.val_buf[NSteps]
+
+    prev = first_val
     @inbounds for i in 2:NSteps - 1
-        prev = @pick_mulass(mul!, mul, s.prefix_buf[i],
+        prev = @pick_mulass(mul!, mul, s.prefix_buf[i - 1],
                             prev, s.val_buf[i])
     end
-    last_val = @inbounds s.val_buf[NSteps]
     res = @inbounds @pick_mul(mul!, mul, s.tmp_buf[1], prev, last_val)
     if isempty(grads)
         return res
     end
     @assert length(grads) == NParams
-    @inbounds s.suffix_buf[NSteps - 1] = prev = last_val
+    prev = last_val
     @inbounds for i in NSteps - 2:-1:1
-        prev = @pick_mulass(mul!, mul, s.suffix_buf[i],
-                            s.val_buf[i + 1], prev)
+        prev = @pick_mulass(mul!, mul, s.suffix_buf[i], s.val_buf[i + 1], prev)
     end
     @inbounds for step_idx in 1:NSteps
         pstart = starts[step_idx]
         pend = ends[step_idx]
         if step_idx == 1
-            suffix = s.suffix_buf[step_idx]
+            suffix = step_idx == NSteps - 1 ? last_val : s.suffix_buf[step_idx]
             for param_idx in pstart:pend
                 @pick_mulass(mul!, mul, grads[param_idx], s.grad_buf[param_idx], suffix)
             end
         elseif step_idx == NSteps
-            prefix = s.prefix_buf[step_idx - 1]
+            prefix = step_idx == 2 ? first_val : s.prefix_buf[step_idx - 2]
             for param_idx in pstart:pend
                 @pick_mulass(mul!, mul, grads[param_idx], prefix, s.grad_buf[param_idx])
             end
         else
-            prefix = s.prefix_buf[step_idx - 1]
-            suffix = s.suffix_buf[step_idx]
+            prefix = step_idx == 2 ? first_val : s.prefix_buf[step_idx - 2]
+            suffix = step_idx == NSteps - 1 ? last_val : s.suffix_buf[step_idx]
             for param_idx in pstart:pend
                 tmp = @pick_mul(mul!, mul, s.tmp_buf[2], prefix, s.grad_buf[param_idx])
                 @pick_mulass(mul!, mul, grads[param_idx], tmp, suffix)
