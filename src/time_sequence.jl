@@ -25,19 +25,44 @@ function set_params! end
 (nparams(::Type{T} where T<:AbstractStep{OP,NParams}) where {OP,NParams}) = NParams
 (nparams(::AbstractStep{OP,NParams}) where {OP,NParams}) = NParams
 
-struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,NSteps1} <: AbstractStep{OP,NParams}
+default_init(T) = nothing
+default_mul(T) = *
+default_mul!(T) = nothing
+
+_fill_cb(ary, cb) = for i in eachindex(ary)
+    ary[i] = cb()
+end
+
+struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,NSteps1,Mul,Mul!} <: AbstractStep{OP,NParams}
     steps::Steps
     val_buff::MVector{NSteps,OP}
     grad_buff::MVector{NParams,OP}
     prefix_buff::MVector{NSteps1,OP}
     suffix_buff::MVector{NSteps1,OP}
+    tmp_buff::MVector{2,OP} # [Result, intermediate for gradient]
+    mul::Mul
+    mul!::Mul!
 
-    function Sequence{OP}(steps::Steps) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps}
+    function Sequence{OP}(steps::Steps; @specialize(init=default_init(OP)),
+                          mul::Mul=default_mul(OP), mul!::(Mul!)=default_mul!(OP)) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Mul,Mul!}
         @assert NSteps > 0
+        if mul! !== nothing
+            @assert init !== nothing
+            @assert mul === nothing
+        end
         NParams = sum(nparams, steps)
-        return new{OP,NSteps,Steps,NParams,NSteps - 1}(
+        s = new{OP,NSteps,Steps,NParams,NSteps - 1,Mul,Mul!}(
             steps, MVector{NSteps,OP}(undef), MVector{NParams,OP}(undef),
-            MVector{NSteps - 1,OP}(undef), MVector{NSteps - 1,OP}(undef))
+            MVector{NSteps - 1,OP}(undef), MVector{NSteps - 1,OP}(undef),
+            MVector{2,OP}(undef), mul, mul!)
+        if init !== nothing
+            _fill_cb(s.val_buff, init)
+            _fill_cb(s.grad_buff, init)
+            _fill_cb(s.prefix_buff, init)
+            _fill_cb(s.suffix_buff, init)
+            _fill_cb(s.tmp_buff, init)
+        end
+        return s
     end
 end
 
@@ -94,25 +119,44 @@ end
     return ex
 end
 
+macro pick_mul(mul!, mul, out, a, b)
+    mul! = esc(mul!)
+    mul = esc(mul)
+    out = esc(out)
+    a = esc(a)
+    b = esc(b)
+    quote
+        if $mul! === nothing
+            $mul($a, $b)
+        else
+            $mul!($out, $a, $b)
+        end
+    end
+end
+
 function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,Steps,NParams}
     if NSteps == 1
         return compute(s.steps[1], grads)
     end
+    mul = s.mul
+    mul! = s.mul!
     starts, ends = _param_range(typeof(s))
     @inline _eval_compute(s, grads)
     @inbounds s.prefix_buff[1] = prev = s.val_buff[1]
     @inbounds for i in 2:NSteps - 1
-        s.prefix_buff[i] = prev = prev * s.val_buff[i]
+        s.prefix_buff[i] = prev = @pick_mul(mul!, mul, s.prefix_buff[i],
+                                            prev, s.val_buff[i])
     end
     last_val = @inbounds s.val_buff[NSteps]
-    res = @inbounds prev * last_val
+    res = @inbounds @pick_mul(mul!, mul, s.tmp_buff[1], prev, last_val)
     if isempty(grads)
         return res
     end
     @assert length(grads) == NParams
     @inbounds s.suffix_buff[NSteps - 1] = prev = last_val
     @inbounds for i in NSteps - 2:-1:1
-        s.suffix_buff[i] = prev = s.val_buff[i + 1] * prev
+        s.suffix_buff[i] = prev = @pick_mul(mul!, mul, s.suffix_buff[i],
+                                            s.val_buff[i + 1], prev)
     end
     @inbounds for step_idx in 1:NSteps
         pstart = starts[step_idx]
@@ -120,18 +164,21 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
         if step_idx == 1
             suffix = s.suffix_buff[step_idx]
             for param_idx in pstart:pend
-                grads[param_idx] = s.grad_buff[param_idx] * suffix
+                grads[param_idx] = @pick_mul(mul!, mul, grads[param_idx],
+                                             s.grad_buff[param_idx], suffix)
             end
         elseif step_idx == NSteps
             prefix = s.prefix_buff[step_idx - 1]
             for param_idx in pstart:pend
-                grads[param_idx] = prefix * s.grad_buff[param_idx]
+                grads[param_idx] = @pick_mul(mul!, mul, grads[param_idx],
+                                             prefix, s.grad_buff[param_idx])
             end
         else
             prefix = s.prefix_buff[step_idx - 1]
             suffix = s.suffix_buff[step_idx]
             for param_idx in pstart:pend
-                grads[param_idx] = prefix * s.grad_buff[param_idx] * suffix
+                tmp = @pick_mul(mul!, mul, s.tmp_buff[2], prefix, s.grad_buff[param_idx])
+                grads[param_idx] = @pick_mul(mul!, mul, grads[param_idx], tmp, suffix)
             end
         end
     end
