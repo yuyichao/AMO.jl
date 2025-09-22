@@ -100,18 +100,19 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
     end
     starts, ends = _param_range(typeof(s))
     @inline _eval_compute(s, grads)
-    @inbounds s.prefix_buff[1] = s.val_buff[1]
+    @inbounds s.prefix_buff[1] = prev = s.val_buff[1]
     @inbounds for i in 2:NSteps - 1
-        s.prefix_buff[i] = s.prefix_buff[i - 1] * s.val_buff[i]
+        s.prefix_buff[i] = prev = prev * s.val_buff[i]
     end
-    res = @inbounds s.prefix_buff[NSteps - 1] * s.val_buff[NSteps]
+    last_val = @inbounds s.val_buff[NSteps]
+    res = @inbounds prev * last_val
     if isempty(grads)
         return res
     end
     @assert length(grads) == NParams
-    @inbounds s.suffix_buff[NSteps - 1] = s.val_buff[NSteps]
+    @inbounds s.suffix_buff[NSteps - 1] = prev = last_val
     @inbounds for i in NSteps - 2:-1:1
-        s.suffix_buff[i] = s.val_buff[i + 1] * s.suffix_buff[i + 1]
+        s.suffix_buff[i] = prev = s.val_buff[i + 1] * prev
     end
     @inbounds for step_idx in 1:NSteps
         pstart = starts[step_idx]
