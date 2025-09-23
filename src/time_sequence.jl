@@ -190,6 +190,7 @@ end
     @inbounds for i in NSteps - 2:-1:1
         prev = @pick_mulass(mul!, mul, s.suffix_buf[i], s.val_buf[i + 1], prev)
     end
+    tmp2 = NSteps > 2 && mul! !== nothing ? @inbounds(s.tmp_buf[2]) : nothing
     starts, ends = _param_range(typeof(s))
     @inbounds for step_idx in 1:NSteps
         pstart = starts[step_idx]
@@ -208,7 +209,7 @@ end
             prefix = step_idx == 2 ? first_val : s.prefix_buf[step_idx - 2]
             suffix = step_idx == NSteps - 1 ? last_val : s.suffix_buf[step_idx]
             for param_idx in pstart:pend
-                tmp = @pick_mul(mul!, mul, s.tmp_buf[2], prefix, s.grad_buf[param_idx])
+                tmp = @pick_mul(mul!, mul, tmp2, prefix, s.grad_buf[param_idx])
                 @pick_mulass(mul!, mul, grads[param_idx], tmp, suffix)
             end
         end
@@ -232,7 +233,7 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
         prev = @pick_mulass(mul!, mul, s.prefix_buf[i - 1],
                             prev, s.val_buf[i])
     end
-    res = @inbounds @pick_mul(mul!, mul, s.tmp_buf[1], prev, last_val)
+    res = @pick_mul(mul!, mul, s.tmp_buf[1], prev, last_val)
     has_grad && _eval_grads(s, grads, mul, mul!, first_val, last_val)
     return res
 end
