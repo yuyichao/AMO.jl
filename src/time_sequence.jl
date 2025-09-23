@@ -122,7 +122,9 @@ end
     return ex
 end
 
-__eval_compute_body(starts, ends, has_grad) = [
+# Insert a `nothing` prefix to the array to avoid the compiler optimize out
+# the line number node when interpolating the expression to the parent function.
+__eval_compute_body(starts, ends, has_grad) = insert!(Any[
     quote
         step = steps[$i]
         stepgrad = $(has_grad ? :(@view(grad_buf[$start_idx:$end_idx])) : :dummy_grad)
@@ -131,7 +133,7 @@ __eval_compute_body(starts, ends, has_grad) = [
         else
             val_buf[$i] = compute(step, stepgrad)
         end
-    end for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))]
+    end for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))], 1, :nothing)
 
 @generated function _eval_compute(s::Sequence{OP}, grads, has_grad) where OP
     starts, ends = _param_range(s)
