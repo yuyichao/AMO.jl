@@ -67,7 +67,7 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
             MVector{n,OP}(undef))
         op_vec(n, assign) = if n <= 0
             return nothing
-        elseif assign && !op_isbits
+        elseif !op_isbits
             return _op_vec(n)
         else
             return _op_mvec(n)
