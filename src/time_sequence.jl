@@ -62,7 +62,15 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
         all_inplace = all(s->support_inplace_compute(typeof(s)), steps)
         op_isbits = isbitstype(OP)
 
-        _op_vec(n) = init !== nothing ? [init()::OP for _ in 1:n] : Vector{OP}(undef, n)
+        function _op_vec(n)
+            mem = Memory{OP}(undef, n)
+            if init !== nothing
+                @inbounds for i in 1:n
+                    mem[i] = init()::OP
+                end
+            end
+            return mem
+        end
         _op_mvec(n) = (init !== nothing ? MVector(ntuple(_->init()::OP, n)) :
             MVector{n,OP}(undef))
         op_vec(n, assign) = if n <= 0
