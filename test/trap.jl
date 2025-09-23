@@ -28,4 +28,29 @@ using AMO: Trap
     end
 end
 
+function test_sideband(nmax, η)
+    N = nmax * 2 + 10
+    M = zeros(ComplexF64, N, N)
+    for i in 1:N - 1
+        M[i + 1, i] = M[i, i + 1] = im * η * sqrt(i)
+    end
+    M = exp(M)
+    for n1 in 0:nmax
+        for n2 in 0:nmax
+            ele = M[n1 + 1, n2 + 1]
+            @test Trap.sideband(n1, n2, η) ≈ ele atol=sqrt(eps()) rtol=sqrt(eps())
+            @test Trap.sideband(n1, n2, η, phase=true) ≈ ele atol=sqrt(eps()) rtol=sqrt(eps())
+            @test abs(Trap.sideband(n1, n2, η, phase=false)) ≈ abs(ele) atol=sqrt(eps()) rtol=sqrt(eps())
+        end
+    end
+end
+
+@testset "Sideband" begin
+    test_sideband(150, 0.1)
+    test_sideband(150, 0.2)
+    test_sideband(150, 0.5)
+    test_sideband(150, 1.2)
+    test_sideband(150, 2.5)
+end
+
 end

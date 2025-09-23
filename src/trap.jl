@@ -2,6 +2,9 @@
 
 module Trap
 
+using ..Math: assoc_laguerre
+using SpecialFunctions
+
 const c = 299792458
 const h = 6.62607015e-34
 const ħ = h / 2π
@@ -46,5 +49,54 @@ end
     return sqrt(T(ħ) / 2 / m / ωm) * kp
 end
 
+function (_sideband(n1::Integer, n2::Integer, η::T)::T) where {T<:AbstractFloat}
+    if n1 < 0 || n2 < 0
+        return 0
+    elseif η == 0
+        if n1 == n2
+            return 1
+        else
+            return 0
+        end
+    end
+    # Ref http://journals.aps.org/pra/pdf/10.1103/PhysRevA.20.1521
+    # Δn ≡ |n1 - n2|
+    # n₋ ≡ min(n1, n2)
+    # n₊ ≡ max(n1, n2)
+    #   ⟨n1|exp(ikx)|n2⟩
+    # = ⟨n1|exp(iη(a + a†))|n2⟩
+    # = exp(-η^2 / 2) η^Δn √(γ(n₋ + 1) / γ(n₊ + 1)) L^Δn_n₋(η^2)
+    # = exp(-η^2 / 2 + Δn log(η) + lγ(n₋ + 1) / 2 - lγ(n₊ + 1) / 2) L^Δn_n₋(η^2)
+    η²::T = η * η
+    @fastmath if n1 == n2
+        lpre = η² * T(-0.5)
+        lag = assoc_laguerre(η², n1, 0)
+    else
+        n₋ = min(n1, n2)
+        n₊ = max(n1, n2)
+        Δn = abs(n1 - n2)
+        lpre = (-η² + lgamma(T(n₋ + 1)) - lgamma(T(n₊ + 1))) / 2 + log(η) * Δn
+        lag = assoc_laguerre(η², n₋, Δn)
+    end
+    return @fastmath lag * exp(lpre)
+end
+@inline _sideband(n1::Integer, n2::Integer, η) = _sideband(n1, n2, float(η))
+
+@inline function sideband(n1, n2, η; phase=true)
+    s = _sideband(n1, n2, η)
+    if !phase
+        return s
+    end
+    Δn = abs(n1 - n2) & 3
+    if Δn == 0
+        return complex(s, 0)
+    elseif Δn == 1
+        return complex(0, s)
+    elseif Δn == 2
+        return complex(-s, 0)
+    else
+        return complex(0, -s)
+    end
+end
 
 end
