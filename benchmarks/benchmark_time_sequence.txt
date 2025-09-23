@@ -1,0 +1,26 @@
+S1
+  4.762 μs (0 allocations: 0 bytes)
+  19.041 μs (0 allocations: 0 bytes)
+S2
+  25.706 μs (6000 allocations: 93.75 KiB)
+  75.745 μs (18000 allocations: 281.25 KiB)
+  26.207 μs (6000 allocations: 93.75 KiB)
+  76.370 μs (18000 allocations: 281.25 KiB)
+S3
+  7.447 μs (0 allocations: 0 bytes)
+  27.248 μs (0 allocations: 0 bytes)
+  7.270 μs (0 allocations: 0 bytes)
+  26.498 μs (0 allocations: 0 bytes)
+S4
+  8.972 μs (0 allocations: 0 bytes)
+  36.914 μs (0 allocations: 0 bytes)
+S5
+  45.539 μs (12000 allocations: 187.50 KiB)
+  150.408 μs (36000 allocations: 562.50 KiB)
+  45.997 μs (12000 allocations: 187.50 KiB)
+  151.409 μs (36000 allocations: 562.50 KiB)
+S6
+  12.124 μs (0 allocations: 0 bytes)
+  53.247 μs (0 allocations: 0 bytes)
+  12.125 μs (0 allocations: 0 bytes)
+  52.872 μs (0 allocations: 0 bytes)
