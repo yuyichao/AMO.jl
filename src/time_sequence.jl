@@ -6,6 +6,8 @@ using StaticArrays
 
 abstract type AbstractStep{OP,NParams} end
 
+@inline support_inplace_compute(T) = false
+
 """
     compute(step::AbstractStep{OP,NParams}, grad::AbstractVector{OP})::OP
 
@@ -14,6 +16,14 @@ If `grad` is not empty, it should be an array of size `NParams` to store the
 gradient WRT each parameter.
 """
 function compute end
+
+"""
+    compute!(output::OP, step::AbstractStep{OP,NParams}, grad::AbstractVector{OP})
+
+Similar to `compute` but does everything in-place by mutating the `OP` object
+in `output` and the `grad` array.
+"""
+function compute! end
 
 """
     set_params!(step::AbstractStep{OP,NParams}, params::AbstractVector)::Nothing
@@ -29,50 +39,58 @@ get_init(T) = nothing
 get_mul(T) = *
 get_mul!(T) = nothing
 
-struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,ValBuf,GradBuf,PartialBuf,TmpBuf,Mul,Mul!} <: AbstractStep{OP,NParams}
+struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf} <: AbstractStep{OP,NParams}
     steps::Steps
     val_buf::ValBuf
     grad_buf::GradBuf
     prefix_buf::PartialBuf
     suffix_buf::PartialBuf
     tmp_buf::TmpBuf # [Result, intermediate for gradient]
+
+    init::Init
     mul::Mul
     mul!::Mul!
 
-    function Sequence{OP}(steps::Steps; @specialize(init=get_init(OP)),
-                          mul::Mul=get_mul(OP), mul!::(Mul!)=get_mul!(OP)) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Mul,Mul!}
+    function Sequence{OP}(steps::Steps; init::Init=get_init(OP),
+                          mul::Mul=get_mul(OP), mul!::(Mul!)=get_mul!(OP)) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Init,Mul,Mul!}
         @assert NSteps > 0
         if mul! !== nothing
             @assert init !== nothing
             @assert mul === nothing
-        else
-            @assert init === nothing
         end
         NParams = sum(nparams, steps)
-        tmp_buf = nothing
-        if init !== nothing
-            val_buf = [init()::OP for _ in 1:NSteps]
-            grad_buf = [init()::OP for _ in 1:NParams]
-            prefix_buf = NSteps <= 2 ? nothing : MVector(ntuple(_->init()::OP, NSteps - 2))
-            suffix_buf = NSteps <= 2 ? nothing : MVector(ntuple(_->init()::OP, NSteps - 2))
-            tmp_buf = MVector(ntuple(_->init()::OP, 2))
-        elseif isbitstype(OP)
-            val_buf = MVector{NSteps,OP}(undef)
-            grad_buf = MVector{NParams,OP}(undef)
-            prefix_buf = NSteps <= 2 ? nothing : MVector{NSteps - 2,OP}(undef)
-            suffix_buf = NSteps <= 2 ? nothing : MVector{NSteps - 2,OP}(undef)
+        all_inplace = all(s->support_inplace_compute(typeof(s)), steps)
+        op_isbits = isbitstype(OP)
+
+        _op_vec(n) = init !== nothing ? [init()::OP for _ in 1:n] : Vector{OP}(undef, n)
+        _op_mvec(n) = (init !== nothing ? MVector(ntuple(_->init()::OP, n)) :
+            MVector{n,OP}(undef))
+        op_vec(n, assign) = if n <= 0
+            return nothing
+        elseif assign && !op_isbits
+            return _op_vec(n)
         else
-            val_buf = Vector{OP}(undef, NSteps)
-            grad_buf = Vector{OP}(undef, NParams)
-            prefix_buf = NSteps <= 2 ? nothing : Vector{OP}(undef, NSteps - 2)
-            suffix_buf = NSteps <= 2 ? nothing : Vector{OP}(undef, NSteps - 2)
+            return _op_mvec(n)
         end
-        s = new{OP,NSteps,Steps,NParams,typeof(val_buf),typeof(grad_buf),
-                typeof(prefix_buf),typeof(tmp_buf),Mul,Mul!}(
+
+        val_buf = op_vec(NSteps, !all_inplace)
+        grad_buf = op_vec(NParams, !all_inplace)
+        prefix_buf = op_vec(NSteps - 2, mul! === nothing)
+        suffix_buf = op_vec(NSteps - 2, mul! === nothing)
+        tmp_buf = op_vec(2, false)
+        s = new{OP,NSteps,Steps,NParams,Init,Mul,Mul!,typeof(val_buf),typeof(grad_buf),
+                typeof(prefix_buf),typeof(tmp_buf)}(
                     steps, val_buf, grad_buf, prefix_buf, suffix_buf,
-                    tmp_buf, mul, mul!)
+                    tmp_buf, init, mul, mul!)
         return s
     end
+end
+
+Base.@assume_effects :foldable function support_inplace_compute(::Type{<:Sequence{OP,NSteps,Steps,NParams,Init,Mul,Mul!}}) where {OP,NSteps,Steps,NParams,Init,Mul,Mul!}
+    if NSteps == 1
+        return support_inplace_compute(Steps.parameters[1])
+    end
+    return Mul! !== Nothing
 end
 
 @generated function _param_range(::Type{<:Sequence{OP,NSteps,Steps}}) where {OP,NSteps,Steps}
@@ -97,7 +115,7 @@ end
     return ex
 end
 
-@generated function _eval_compute(s::Sequence{OP}, grads) where OP
+@generated function _eval_compute(s::Sequence{OP}, grads, has_grad) where OP
     ex = quote
         steps = s.steps
         grad_buf = s.grad_buf
@@ -107,24 +125,18 @@ end
     ex1 = quote end
     ex2 = quote end
     for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))
-        push!(ex1.args, :(
-            @inbounds begin
-                @inline val_buf[$i] = compute(steps[$i], SVector{0,OP}())
-            end))
-        push!(ex2.args, :(
-            @inbounds begin
-                @inline val_buf[$i] =
-                    compute(steps[$i], @view grad_buf[$start_idx:$end_idx])
+        push!(ex.args, :(
+            @inbounds @inline begin
+                step = steps[$i]
+                stepgrad = (has_grad ? @view(grad_buf[$start_idx:$end_idx]) :
+                    SVector{0,OP}())
+                if support_inplace_compute(typeof(step))
+                    compute!(val_buf[$i], step, stepgrad)
+                else
+                    val_buf[$i] = compute(step, stepgrad)
+                end
             end))
     end
-    push!(ex.args, quote
-              if isempty(grads)
-                  $ex1
-              else
-                  $ex2
-              end
-              return
-          end)
     return ex
 end
 
@@ -163,31 +175,13 @@ macro pick_mulass(mul!, mul, out, a, b)
     end
 end
 
-function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,Steps,NParams}
-    if NSteps == 1
-        return compute(s.steps[1], grads)
-    end
-    mul = s.mul
-    mul! = s.mul!
-    starts, ends = _param_range(typeof(s))
-    @inline _eval_compute(s, grads)
-    first_val = @inbounds s.val_buf[1]
-    last_val = @inbounds s.val_buf[NSteps]
-
-    prev = first_val
-    @inbounds for i in 2:NSteps - 1
-        prev = @pick_mulass(mul!, mul, s.prefix_buf[i - 1],
-                            prev, s.val_buf[i])
-    end
-    res = @inbounds @pick_mul(mul!, mul, s.tmp_buf[1], prev, last_val)
-    if isempty(grads)
-        return res
-    end
+@inline function _eval_grads(s::Sequence{OP,NSteps,Steps,NParams}, grads, mul, mul!, first_val, last_val) where {OP,NSteps,Steps,NParams}
     @assert length(grads) == NParams
     prev = last_val
     @inbounds for i in NSteps - 2:-1:1
         prev = @pick_mulass(mul!, mul, s.suffix_buf[i], s.val_buf[i + 1], prev)
     end
+    starts, ends = _param_range(typeof(s))
     @inbounds for step_idx in 1:NSteps
         pstart = starts[step_idx]
         pend = ends[step_idx]
@@ -210,6 +204,50 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
             end
         end
     end
+    return
+end
+
+function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,Steps,NParams}
+    if NSteps == 1
+        return compute(s.steps[1], grads)
+    end
+    mul = s.mul
+    mul! = s.mul!
+    has_grad = !isempty(grads)
+    @inline _eval_compute(s, grads, has_grad)
+    first_val = @inbounds s.val_buf[1]
+    last_val = @inbounds s.val_buf[NSteps]
+
+    prev = first_val
+    @inbounds for i in 2:NSteps - 1
+        prev = @pick_mulass(mul!, mul, s.prefix_buf[i - 1],
+                            prev, s.val_buf[i])
+    end
+    res = @inbounds @pick_mul(mul!, mul, s.tmp_buf[1], prev, last_val)
+    has_grad && _eval_grads(s, grads, mul, mul!, first_val, last_val)
+    return res
+end
+
+function compute!(res::OP, s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,Steps,NParams}
+    if NSteps == 1
+        compute!(res, s.steps[1], grads)
+        return res
+    end
+    mul! = s.mul!
+    @assert mul! !== nothing
+    has_grad = !isempty(grads)
+    @inline _eval_compute(s, grads, has_grad)
+    first_val = @inbounds s.val_buf[1]
+    last_val = @inbounds s.val_buf[NSteps]
+
+    prev = first_val
+    @inbounds for i in 2:NSteps - 1
+        next = s.prefix_buf[i - 1]
+        mul!(next, prev, s.val_buf[i])
+        prev = next
+    end
+    mul!(res, prev, last_val)
+    has_grad && _eval_grads(s, grads, nothing, mul!, first_val, last_val)
     return res
 end
 
