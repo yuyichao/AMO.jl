@@ -59,10 +59,9 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
             @assert mul === nothing
         end
         NParams = sum(nparams, steps)
-        all_inplace = all(s->support_inplace_compute(typeof(s)), steps)
         op_isbits = isbitstype(OP)
 
-        function _op_vec(n)
+        function op_mem(n)
             mem = Memory{OP}(undef, n)
             if init !== nothing
                 @inbounds for i in 1:n
@@ -71,21 +70,21 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
             end
             return mem
         end
-        _op_mvec(n) = (init !== nothing ? MVector(ntuple(_->init()::OP, n)) :
+        op_mvec(n) = (init !== nothing ? MVector(ntuple(_->init()::OP, n)) :
             MVector{n,OP}(undef))
-        op_vec(n, assign) = if n <= 0
+        op_buf(n) = if n <= 0
             return nothing
         elseif !op_isbits
-            return _op_vec(n)
+            return op_mem(n)
         else
-            return _op_mvec(n)
+            return op_mvec(n)
         end
 
-        val_buf = op_vec(NSteps, !all_inplace)
-        grad_buf = op_vec(NParams, !all_inplace)
-        prefix_buf = op_vec(NSteps - 2, mul! === nothing)
-        suffix_buf = op_vec(NSteps - 2, mul! === nothing)
-        tmp_buf = op_vec(2, false)
+        val_buf = op_buf(NSteps)
+        grad_buf = op_buf(NParams)
+        prefix_buf = op_buf(NSteps - 2)
+        suffix_buf = op_buf(NSteps - 2)
+        tmp_buf = mul! === nothing ? nothing : (init()::OP, init()::OP)
         s = new{OP,NSteps,Steps,NParams,Init,Mul,Mul!,typeof(val_buf),typeof(grad_buf),
                 typeof(prefix_buf),typeof(tmp_buf)}(
                     steps, val_buf, grad_buf, prefix_buf, suffix_buf,
@@ -130,8 +129,6 @@ end
         val_buf = s.val_buf
     end
     starts, ends = _param_range(s)
-    ex1 = quote end
-    ex2 = quote end
     for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))
         push!(ex.args, :(
             @inbounds @inline begin
