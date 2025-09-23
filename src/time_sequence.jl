@@ -155,15 +155,15 @@ macro pick_mul(mul!, mul, out, a, b)
     out = esc(out)
     a = esc(a)
     b = esc(b)
-    quote
-        if $mul! === nothing
-            $mul($a, $b)
-        else
-            v = $out
-            $mul!(v, $a, $b)
-            v
-        end
-    end
+    # Use an dummy expression to make sure the original source info is preserved
+    :(nothing;
+      if $mul! === nothing
+          $mul($a, $b)
+      else
+          v = $out
+          $mul!(v, $a, $b)
+          v
+      end)
 end
 
 macro pick_mulass(mul!, mul, out, a, b)
@@ -172,16 +172,16 @@ macro pick_mulass(mul!, mul, out, a, b)
     out = esc(out)
     a = esc(a)
     b = esc(b)
-    quote
-        if $mul! === nothing
-            v = $mul($a, $b)
-            $out = v
-        else
-            v = $out
-            $mul!(v, $a, $b)
-        end
-        v
-    end
+    # Use an dummy expression to make sure the original source info is preserved
+    :(nothing;
+      if $mul! === nothing
+          v = $mul($a, $b)
+          $out = v
+      else
+          v = $out
+          $mul!(v, $a, $b)
+      end;
+      v)
 end
 
 @inline function _eval_grads(s::Sequence{OP,NSteps,Steps,NParams}, grads, mul, mul!, first_val, last_val) where {OP,NSteps,Steps,NParams}
