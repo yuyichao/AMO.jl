@@ -122,25 +122,29 @@ end
     return ex
 end
 
+__eval_compute_body(starts, ends, has_grad) = [
+    quote
+        step = steps[$i]
+        stepgrad = $(has_grad ? :(@view(grad_buf[$start_idx:$end_idx])) : :dummy_grad)
+        if support_inplace_compute(typeof(step))
+            compute!(val_buf[$i], step, stepgrad)
+        else
+            val_buf[$i] = compute(step, stepgrad)
+        end
+    end for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))]
+
 @generated function _eval_compute(s::Sequence{OP}, grads, has_grad) where OP
+    starts, ends = _param_range(s)
     ex = quote
         steps = s.steps
         grad_buf = s.grad_buf
         val_buf = s.val_buf
-    end
-    starts, ends = _param_range(s)
-    for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))
-        push!(ex.args, :(
-            @inbounds @inline begin
-                step = steps[$i]
-                stepgrad = (has_grad ? @view(grad_buf[$start_idx:$end_idx]) :
-                    SVector{0,OP}())
-                if support_inplace_compute(typeof(step))
-                    compute!(val_buf[$i], step, stepgrad)
-                else
-                    val_buf[$i] = compute(step, stepgrad)
-                end
-            end))
+        @inbounds @inline if has_grad
+            $(__eval_compute_body(starts, ends, true)...)
+        else
+            dummy_grad = SVector{0,OP}()
+            $(__eval_compute_body(starts, ends, false)...)
+        end
     end
     return ex
 end
