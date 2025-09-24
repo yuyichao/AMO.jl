@@ -3,6 +3,8 @@
 module TestTrap
 
 using Test
+using Base.Iterators
+
 using AMO: Trap
 
 @testset "Lamb-Dicke" begin
@@ -54,14 +56,48 @@ function test_sideband(nmax, η)
             @test abs(s32) ≈ abs(ele) atol=sqrt(eps(Float32)) rtol=sqrt(eps(Float32))
         end
     end
+
+    for Δn in -nmax:nmax
+        n₋max = nmax - abs(Δn)
+        if Δn < 0
+            nstart = -Δn
+            nend = nmax
+        else
+            nstart = 0
+            nend = n₋max
+        end
+        it_c = Iterators.take(Trap.SidebandIter(Δn, η), n₋max + 1)
+        it_r = Iterators.take(Trap.SidebandIter(Δn, η, phase=false), n₋max + 1)
+        it_c32 = Iterators.take(Trap.SidebandIter(Δn, Float32(η)), n₋max + 1)
+        it_r32 = Iterators.take(Trap.SidebandIter(Δn, Float32(η), phase=false), n₋max + 1)
+        @test eltype(it_c) == ComplexF64
+        @test eltype(it_r) == Float64
+        @test eltype(it_c32) == ComplexF32
+        @test eltype(it_r32) == Float32
+
+        vc = collect(it_c)
+        vr = collect(it_r)
+        vc32 = collect(it_c32)
+        vr32 = collect(it_r32)
+
+        for (i, n1) in enumerate(nstart:nend)
+            n2 = n1 + Δn
+            ele = M[n1 + 1, n2 + 1]
+
+            @test vc[i] ≈ ele atol=sqrt(eps()) rtol=sqrt(eps())
+            @test abs(vr[i]) ≈ abs(ele) atol=sqrt(eps()) rtol=sqrt(eps())
+            if n1 > 100 || n2 > 100
+                # Avoid laguerre polynomial overflow
+                continue
+            end
+            @test vc32[i] ≈ ele atol=sqrt(eps(Float32)) rtol=sqrt(eps(Float32))
+            @test abs(vr32[i]) ≈ abs(ele) atol=sqrt(eps(Float32)) rtol=sqrt(eps(Float32))
+        end
+    end
 end
 
-@testset "Sideband" begin
-    test_sideband(150, 0.1)
-    test_sideband(150, 0.2)
-    test_sideband(150, 0.5)
-    test_sideband(150, 1.2)
-    test_sideband(150, 2.5)
+@testset "Sideband η=$η" for η in [0.1, 0.2, 0.5, 1.2, 2.5]
+    test_sideband(150, η)
 end
 
 end

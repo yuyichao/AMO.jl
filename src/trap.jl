@@ -82,12 +82,11 @@ function (_sideband(n1::Integer, n2::Integer, η::T)::T) where {T<:AbstractFloat
 end
 @inline _sideband(n1::Integer, n2::Integer, η) = _sideband(n1, n2, float(η))
 
-@inline function sideband(n1, n2, η; phase=true)
-    s = _sideband(n1, n2, η)
+@inline function sideband_phase(s, Δn, phase)
     if !phase
         return s
     end
-    Δn = abs(n1 - n2) & 3
+    Δn = Δn & 3
     if Δn == 0
         return complex(s, 0)
     elseif Δn == 1
@@ -97,6 +96,40 @@ end
     else
         return complex(0, -s)
     end
+end
+
+@inline sideband(n1, n2, η; phase=true) =
+    sideband_phase(_sideband(n1, n2, η), abs(n1 - n2), phase)
+
+struct SidebandIter{T<:AbstractFloat,Phase}
+    Δn::Int
+    l_1::T
+    a::T
+    s0::T
+    function SidebandIter(Δn, η; phase=true)
+        Δn = abs(Δn)
+        η = float(η)
+        T = typeof(η)
+        η² = η^2
+        return new{T,phase}(Δn, 1 + Δn - η², Δn - 1 - η²,
+                            exp((-η² - lgamma(T(Δn + 1))) / 2 + log(η) * Δn))
+    end
+end
+
+Base.IteratorSize(::Type{<:SidebandIter}) = Base.IsInfinite()
+Base.eltype(::Type{SidebandIter{T,Phase}}) where {T,Phase} = Phase ? Complex{T} : T
+
+Base.iterate(iter::SidebandIter{T,Phase}) where {T,Phase} =
+    (sideband_phase(iter.s0, iter.Δn, Phase), (1, iter.s0, T(1), iter.l_1))
+
+function Base.iterate(iter::SidebandIter{T,Phase}, (n, s′, l_n′, l_n)) where {T,Phase}
+    Δn = iter.Δn
+    b = Δn - 1
+    a = iter.a
+    s = s′ * sqrt(n / (n + Δn))
+    l1 = muladd(a, l_n, -b * l_n′)
+    l2 = muladd(2, l_n, -l_n′)
+    return sideband_phase(s * l_n, Δn, Phase), (n + 1, s, l_n, l1 / T(n + 1) + l2)
 end
 
 end
