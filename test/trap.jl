@@ -41,6 +41,17 @@ function test_sideband(nmax, η)
             @test Trap.sideband(n1, n2, η) ≈ ele atol=sqrt(eps()) rtol=sqrt(eps())
             @test Trap.sideband(n1, n2, η, phase=true) ≈ ele atol=sqrt(eps()) rtol=sqrt(eps())
             @test abs(Trap.sideband(n1, n2, η, phase=false)) ≈ abs(ele) atol=sqrt(eps()) rtol=sqrt(eps())
+
+            if n1 > 100 || n2 > 100
+                # Avoid laguerre polynomial overflow
+                continue
+            end
+            s32 = Trap.sideband(n1, n2, Float32(η))
+            @test s32 isa Complex{Float32}
+            @test s32 ≈ ele atol=sqrt(eps(Float32)) rtol=sqrt(eps(Float32))
+            s32 = Trap.sideband(n1, n2, Float32(η), phase=false)
+            @test s32 isa Float32
+            @test abs(s32) ≈ abs(ele) atol=sqrt(eps(Float32)) rtol=sqrt(eps(Float32))
         end
     end
 end
