@@ -53,11 +53,7 @@ function (_sideband(n1::Integer, n2::Integer, η::T)::T) where {T<:AbstractFloat
     if n1 < 0 || n2 < 0
         return 0
     elseif η == 0
-        if n1 == n2
-            return 1
-        else
-            return 0
-        end
+        return n1 == n2
     end
     # Ref http://journals.aps.org/pra/pdf/10.1103/PhysRevA.20.1521
     # Δn ≡ |n1 - n2|

@@ -96,7 +96,17 @@ function test_sideband(nmax, η)
     end
 end
 
-@testset "Sideband η=$η" for η in [0.1, 0.2, 0.5, 1.2, 2.5]
+@testset "Sideband" begin
+    for n1 in 0:10
+        for n2 in 0:10
+            @test Trap.sideband(n1, n2, 0) == (n1 == n2)
+        end
+    end
+    @test Trap.sideband(0, -1, 0.2) == 0
+    @test Trap.sideband(-1, 0, 0.3) == 0
+end
+
+@testset "Sideband η=$η" for η in Number[0.1, 0.2, 0.5, 1, 1.2, 2.5]
     test_sideband(150, η)
 end
 
