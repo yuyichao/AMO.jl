@@ -71,7 +71,7 @@ function (_sideband(n1::Integer, n2::Integer, η::T)::T) where {T<:AbstractFloat
         n₋ = min(n1, n2)
         n₊ = max(n1, n2)
         Δn = abs(n1 - n2)
-        lpre = (-η² + lgamma(T(n₋ + 1)) - lgamma(T(n₊ + 1))) / 2 + log(η) * Δn
+        lpre = (-η² + logabsgamma(T(n₋ + 1))[1] - logabsgamma(T(n₊ + 1))[1]) / 2 + log(η) * Δn
         lag = assoc_laguerre(η², n₋, Δn)
     end
     return @fastmath lag * exp(lpre)
@@ -108,7 +108,7 @@ struct SidebandIter{T<:AbstractFloat,Phase}
         T = typeof(η)
         η² = η^2
         return new{T,phase}(Δn, 1 + Δn - η², Δn - 1 - η²,
-                            exp((-η² - lgamma(T(Δn + 1))) / 2 + log(η) * Δn))
+                            exp((-η² - logabsgamma(T(Δn + 1))[1]) / 2 + log(η) * Δn))
     end
 end
 

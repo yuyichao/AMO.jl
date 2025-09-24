@@ -15,8 +15,8 @@ using SpecialFunctions
 #     costh = @fastmath sqrt(cos²th)
 #     th = @fastmath acos(costh)
 #     pre_h = (Tp(π / 2)^2) * η * η * cos²th * sin²th
-#     lg_b = @fastmath lgamma(Tp(n + b))
-#     lnfact = @fastmath lgamma(Tp(n + 1))
+#     lg_b = logabsgamma(Tp(n + b))[1]
+#     lnfact = logabsgamma(Tp(n + 1))[1]
 #     pre_term1 = @fastmath Tp(0.5) * (1 - b) * log(Tp(0.25) * x * η)
 #     pre_term2 = @fastmath Tp(0.25) * log(pre_h)
 #     lnpre = lg_b - lnfact + Tp(0.5) * x + pre_term1 - pre_term2
