@@ -129,4 +129,27 @@ Base.eltype(::Type{SidebandIter{T,Phase}}) where {T,Phase} = Phase ? Complex{T} 
     return sideband_phase(s * l_n, Δn, Phase), (n + 1, s, l_n, l1 / T(n + 1) + l2)
 end
 
+function thermal_population(nbar, n)
+    p0 = 1 / (nbar + 1)
+    α = nbar * p0
+    return p0 * α^n
+end
+
+struct ThermalPopulationIter{T<:AbstractFloat}
+    p0::T
+    α::T
+    @inline function ThermalPopulationIter(nbar)
+        nbar = float(nbar)
+        T = typeof(nbar)
+        p0 = 1 / (nbar + 1)
+        α = nbar * p0
+        return new{T}(p0, α)
+    end
+end
+
+Base.IteratorSize(::Type{<:ThermalPopulationIter}) = Base.IsInfinite()
+Base.eltype(::Type{ThermalPopulationIter{T}}) where T = T
+
+@inline Base.iterate(iter::ThermalPopulationIter, p=iter.p0) = (p, p * iter.α)
+
 end

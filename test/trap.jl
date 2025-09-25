@@ -110,4 +110,26 @@ end
     test_sideband(150, η)
 end
 
+@testset "ThermalPopulation nbar=$nbar" for nbar in Number[0, 0.1, 0.3, 1, 5.0, 10]
+    nmax = ceil(Int, (nbar + 1) * 100)
+    ps1 = [Trap.thermal_population(nbar, n) for n in 0:nmax]
+    it = Trap.ThermalPopulationIter(nbar)
+    ps2 = collect(Iterators.take(it, nmax + 1))
+    it32 = Trap.ThermalPopulationIter(Float32(nbar))
+    ps32 = collect(Iterators.take(it32, nmax + 1))
+
+    @test eltype(it) == Float64
+    @test eltype(it32) == Float32
+
+    @test ps1 ≈ ps2
+    @test ps32 ≈ ps2
+    @test sum(ps1) ≈ 1
+    @test sum(ps2) ≈ 1
+    @test sum(ps32) ≈ 1
+    ns = 0:nmax
+    @test sum(ns .* ps1) ≈ nbar
+    @test sum(ns .* ps2) ≈ nbar
+    @test sum(ns .* ps32) ≈ nbar
+end
+
 end
