@@ -152,4 +152,69 @@ Base.eltype(::Type{ThermalPopulationIter{T}}) where T = T
 
 @inline Base.iterate(iter::ThermalPopulationIter, p=iter.p0) = (p, p * iter.α)
 
+@generated function _thermal_sideband(nbars::NTuple{N}, Δns::NTuple{N}, ηs::NTuple{N,T},
+                                      t, thresh) where {N,T}
+    vs_iter = Symbol[]
+    vs_p0 = Symbol[]
+    vs_α = Symbol[]
+    vs_Δn = Symbol[]
+    vs_nmax = Symbol[]
+
+    body = quote
+        thresh /= N
+        lthresh = log(thresh)
+    end
+    for I in 1:N
+        @gensym v_iter v_p0 v_α v_Δn v_nmax v_nbar v_η
+        push!(vs_iter, v_iter)
+        push!(vs_p0, v_p0)
+        push!(vs_α, v_α)
+        push!(vs_Δn, v_Δn)
+        push!(vs_nmax, v_nmax)
+        push!(body.args, quote
+                  $v_nbar = nbars[$I]
+                  $v_Δn = Δns[$I]
+                  $v_η = ηs[$I]
+                  $v_iter = @inline(SidebandIter($v_Δn, $v_η; phase=false))
+                  $v_p0 = T(1 / ($v_nbar + 1))
+                  $v_α = T($v_nbar * $v_p0)
+                  $v_nmax = max(ceil(Int, lthresh / log($v_α)), 1)
+                  if $v_Δn < 0
+                      $v_p0 *= $v_α^(-$v_Δn)
+                      $v_nmax = max(0, $v_nmax + $v_Δn)
+                  end
+              end)
+    end
+    function gen_body(v_t, I)
+        @gensym s i n t t0 Ω p
+        return quote
+            $s = zero(T)
+            $t0 = $v_t
+            $p = $(vs_p0[I])
+            for ($i, $Ω) in enumerate($(vs_iter[I]))
+                $n = $i - 1
+                $t = $t0 * $Ω
+                $s = muladd($p, $(I == N ? :(sin($t)^2) : gen_body(t, I + 1)), $s)
+                if $n == $(vs_nmax[I])
+                    break
+                end
+                $p *= $(vs_α[I])
+            end
+            $s
+        end
+    end
+    push!(body.args, gen_body(:(T(t)), 1))
+    return body
+end
+
+@inline function thermal_sideband(nbars::NTuple{N,Any}, Δns::NTuple{N,Any},
+                                  ηs::NTuple{N,Any}, t; thresh=1e-3) where {N}
+    return _thermal_sideband(@inline(promote(float.(nbars)...)),
+                             @inline(promote(Δns...)),
+                             @inline(promote(float.(ηs)...)), t, thresh)
+end
+
+@inline thermal_sideband(nbar::Real, Δn::Integer, η::Real, t; kws...) =
+    thermal_sideband((nbar,), (Δn,), (η,), t; kws...)
+
 end

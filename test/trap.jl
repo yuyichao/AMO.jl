@@ -30,13 +30,16 @@ using AMO: Trap
     end
 end
 
-function test_sideband(nmax, η)
-    N = nmax * 2 + 10
+function expη(N, η)
     M = zeros(ComplexF64, N, N)
     for i in 1:N - 1
         M[i + 1, i] = M[i, i + 1] = im * η * sqrt(i)
     end
-    M = exp(M)
+    return exp(M)
+end
+
+function test_sideband(nmax, η)
+    M = expη(nmax * 2 + 10, η)
     for n1 in 0:nmax
         for n2 in 0:nmax
             ele = M[n1 + 1, n2 + 1]
@@ -134,6 +137,58 @@ end
     @test sum(ns .* ps1) ≈ nbar
     @test sum(ns .* ps2) ≈ nbar
     @test sum(ns .* ps32) ≈ nbar
+end
+
+get_nbar_dist(nbar, nmax) =
+    collect(Iterators.take(Trap.ThermalPopulationIter(nbar), nmax + 1))
+
+function f64tof32(v)
+    if v isa Float64
+        return Float32(v)
+    end
+    return v
+end
+
+@testset "Thermal Sideband nbars=$(nbars) ηs=$(ηs)" for (nbars, ηs) in Any[
+    ((2,), (0.2,)), ((1.2,), (0.1,)), ((1.2, 1), (0.1, 0.5)),
+    ((0.2, 0.1, 0.3), (0.1, 0.5, 0.2))]
+
+    N = length(nbars)
+    nmaxs = ceil.(Int, (nbars .+ 1) .* 10)
+    Ms = expη.(nmaxs .* 2 .+ 10, ηs)
+    ps = get_nbar_dist.(nbars, nmaxs)
+    function get_sideband(M, n1, n2)
+        if n1 < 0 || n2 < 0
+            return 0.0
+        end
+        return abs(M[n1 + 1, n2 + 1])
+    end
+
+    ts = range(0, 4, 10)
+    for Δns in Iterators.product(ntuple(_->-3:3, N)...)
+        ss = zeros(length(ts))
+        for _idxs in CartesianIndices(nmaxs .+ 1)
+            idxs = Tuple(_idxs)
+            ns = idxs .- 1
+            p = prod(getindex.(ps, idxs))
+            Ω = prod(get_sideband.(Ms, ns, ns .+ Δns))
+            ss .+= p .* sin.(Ω .* ts).^2
+        end
+        for (t, s) in zip(ts, ss)
+            @test Trap.thermal_sideband(nbars, Δns, ηs, t) ≈ s rtol=1e-3 atol=1e-3
+            @test Trap.thermal_sideband(nbars, Δns, ηs, t, thresh=1e-4) ≈ s rtol=1e-4 atol=1e-4
+            s32 = Trap.thermal_sideband(f64tof32.(nbars), Δns, f64tof32.(ηs), Float32(t))
+            @test s32 isa Float32
+            @test s32 ≈ s rtol=1e-3 atol=1e-3
+            if N != 1
+                continue
+            end
+            @test Trap.thermal_sideband(nbars[1], Δns[1], ηs[1], t) ≈ s rtol=1e-3 atol=1e-3
+            if Δns[1] > 0
+                @test Trap.thermal_sideband(nbars[1], -Δns[1], ηs[1], t) ≈ Trap.thermal_sideband(nbars[1], Δns[1], ηs[1], t) * (nbars[1] / (nbars[1] + 1))^Δns[1] rtol=1e-3 atol=1e-3
+            end
+        end
+    end
 end
 
 end
