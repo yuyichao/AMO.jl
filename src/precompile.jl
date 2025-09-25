@@ -59,4 +59,48 @@ let
                                   (η, η, η, η), 0.1; thresh=1e-1)
         end
     end
+
+    precompile(Int, (Pauli.OPToken,))
+    precompile(Pauli.OPToken, (Int,))
+    for T in [Float32, Float64, ComplexF32, ComplexF64]
+        ws = Pauli.Workspace{T}()
+        PO = Pauli.PauliOperators{T}
+        op = PO(1, ["X1"=>0.1])
+        PO(1, ["X1"=>0.1]; max_len=1, workspace=ws,
+           terms_recorder=Dict{Vector{Int},Pauli.OPToken}())
+        PO(1; max_len=1)
+        empty!(PO(1))
+        precompile(isvalid, (PO, Pauli.OPToken))
+        precompile(getindex, (PO, Pauli.OPToken))
+        precompile(setindex!, (PO, T, Pauli.OPToken))
+        op["X1"] = 0.2
+        op["X1"]
+        +op
+        -op
+        op == op
+        op != op
+        hash(op)
+        show(IOBuffer(), op)
+        op * real(T)(0.1)
+        real(T)(0.1) * op
+        op / real(T)(0.1)
+        real(T)(0.1) \ op
+        op * complex(T)(0.1)
+        complex(T)(0.1) * op
+        op / complex(T)(0.1)
+        complex(T)(0.1) \ op
+        op + op
+        op - op
+        muladd(op, real(T)(0.1), op)
+        muladd(op, complex(T)(0.1), op)
+        muladd(real(T)(0.1), op, op)
+        muladd(complex(T)(0.1), op, op)
+        op * op
+        Pauli.mul!(PO(1), op, op)
+        Pauli.mul!(PO(1), op, op, workspace=ws)
+        Pauli.icomm(op, op)
+        Pauli.icomm(op, op, workspace=ws)
+        Pauli.icomm!(PO(1), op, op)
+        Pauli.icomm!(PO(1), op, op, workspace=ws)
+    end
 end

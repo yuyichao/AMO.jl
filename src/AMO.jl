@@ -14,6 +14,8 @@ include("trap.jl")
 
 include("time_sequence.jl")
 
+include("pauli.jl")
+
 include("precompile.jl")
 
 end
