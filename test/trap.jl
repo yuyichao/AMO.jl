@@ -79,6 +79,10 @@ function test_sideband(nmax, η)
         vr = collect(it_r)
         vc32 = collect(it_c32)
         vr32 = collect(it_r32)
+        @test eltype(vc) == ComplexF64
+        @test eltype(vr) == Float64
+        @test eltype(vc32) == ComplexF32
+        @test eltype(vr32) == Float32
 
         for (i, n1) in enumerate(nstart:nend)
             n2 = n1 + Δn

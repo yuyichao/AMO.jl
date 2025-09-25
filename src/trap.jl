@@ -123,7 +123,7 @@ Base.eltype(::Type{SidebandIter{T,Phase}}) where {T,Phase} = Phase ? Complex{T} 
     Δn = iter.Δn
     b = Δn - 1
     a = iter.a
-    s = s′ * @fastmath sqrt(n / (n + Δn))
+    s = s′ * @fastmath sqrt(T(n) / T(n + Δn))
     l1 = muladd(a, l_n, -b * l_n′)
     l2 = muladd(2, l_n, -l_n′)
     return sideband_phase(s * l_n, Δn, Phase), (n + 1, s, l_n, l1 / T(n + 1) + l2)
