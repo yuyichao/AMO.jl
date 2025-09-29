@@ -5,7 +5,7 @@ module Utils
 using Base.Threads
 using Base.Iterators
 
-export ThreadObjectPool, eachobj
+export ThreadObjectPool, ObjectPool, eachobj
 
 mutable struct ObjSlot{T}
     @atomic value::Union{T,Nothing}
@@ -73,7 +73,48 @@ end
 
 function eachobj(pool::ThreadObjectPool{T}) where T
     normal_vals = ((@atomic :unordered s.value) for s in (@atomic :unordered pool.array))
-    return Iterators.flatten(((v for v in normal_vals if v !== nothing), pool.extra))
+    return Iterators.flatten(((v::T for v in normal_vals if v !== nothing), pool.extra))
+end
+
+mutable struct ObjectPool{T,CB}
+    const lock::ReentrantLock
+    const cb::CB
+    @atomic value::Union{T,Nothing}
+    const extra::Vector{T} # Protected by lock
+    function ObjectPool(cb::CB) where CB
+        obj = cb()
+        T = typeof(obj)
+        return new{T,CB}(ReentrantLock(), cb, obj, T[])
+    end
+end
+
+function Base.get(pool::ObjectPool{T}) where T
+    obj = @atomicswap(:acquire_release, pool.value = nothing)
+    if obj !== nothing
+        return obj::T
+    end
+    @lock pool.lock begin
+        if !isempty(pool.extra)
+            return pop!(pool.extra)
+        end
+        return pool.cb()::T
+    end
+end
+
+function Base.put!(pool::ObjectPool{T}, obj::T) where T
+    obj = @atomicswap(:acquire_release, pool.value = obj)
+    if obj === nothing
+        return
+    end
+    @lock pool.lock begin
+        push!(pool.extra, obj)
+    end
+    return
+end
+
+function eachobj(pool::ObjectPool{T}) where T
+    normal_vals = (@atomic(:unordered, pool.value),)
+    return Iterators.flatten(((v::T for v in normal_vals if v !== nothing), pool.extra))
 end
 
 end

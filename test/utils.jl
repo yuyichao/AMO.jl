@@ -2,15 +2,15 @@
 
 module TestUtils
 
-using AMO.Utils: ThreadObjectPool, eachobj
+using AMO.Utils: ThreadObjectPool, ObjectPool, eachobj
 
 using Test
 using Base.Threads
 
 println("Testing with $(nthreads()) threads.")
 
-@testset "ThreadObjectPool" begin
-    p = ThreadObjectPool() do
+@testset "$(Pool)" for Pool in [ThreadObjectPool, ObjectPool]
+    p = Pool() do
         return Ref(0)
     end
     N = 10000
