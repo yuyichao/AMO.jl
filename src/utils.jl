@@ -11,6 +11,9 @@ mutable struct ObjSlot{T}
     @atomic value::Union{T,Nothing}
 end
 
+_typeof(v) = typeof(v)
+_typeof(::Type{T}) where T = Type{T}
+
 mutable struct ThreadObjectPool{T,CB}
     const lock::ReentrantLock
     const cb::CB
@@ -21,11 +24,11 @@ mutable struct ThreadObjectPool{T,CB}
     # so that we never have duplicated/missing references to any objects.
     @atomic array::Vector{ObjSlot{T}}
     const extra::Vector{T} # Protected by lock
-    function ThreadObjectPool(cb::CB) where CB
+    function ThreadObjectPool(cb)
         obj = cb()
         T = typeof(obj)
         array = [ObjSlot{T}(obj)]
-        return new{T,CB}(ReentrantLock(), cb, array, T[])
+        return new{T,_typeof(cb)}(ReentrantLock(), cb, array, T[])
     end
 end
 
@@ -81,10 +84,10 @@ mutable struct ObjectPool{T,CB}
     const cb::CB
     @atomic value::Union{T,Nothing}
     const extra::Vector{T} # Protected by lock
-    function ObjectPool(cb::CB) where CB
+    function ObjectPool(cb)
         obj = cb()
         T = typeof(obj)
-        return new{T,CB}(ReentrantLock(), cb, obj, T[])
+        return new{T,_typeof(cb)}(ReentrantLock(), cb, obj, T[])
     end
 end
 
