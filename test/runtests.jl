@@ -1,5 +1,6 @@
 #!/usr/bin/julia
 
+include("utils.jl")
 include("math.jl")
 include("rand.jl")
 include("atomic.jl")
