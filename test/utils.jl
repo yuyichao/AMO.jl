@@ -33,6 +33,8 @@ Base.setindex!(c::Counter, v) = (c.v = v)
             put!(p, o)
         end
         @test sum(v[] for v in eachobj(p)) == 3N
+        empty!(p)
+        @test sum((v[] for v in eachobj(p)), init=0) == 0
     end
 end
 

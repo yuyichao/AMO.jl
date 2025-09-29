@@ -74,6 +74,14 @@ function Base.put!(pool::ThreadObjectPool{T}, obj::T) where T
     return
 end
 
+function Base.empty!(pool::ThreadObjectPool)
+    array = @atomic :unordered pool.array
+    resize!(array, 1)
+    @atomic :unordered array[1].value = nothing
+    empty!(pool.extra)
+    return
+end
+
 function eachobj(pool::ThreadObjectPool{T}) where T
     normal_vals = ((@atomic :unordered s.value) for s in (@atomic :unordered pool.array))
     return Iterators.flatten(((v::T for v in normal_vals if v !== nothing), pool.extra))
@@ -112,6 +120,12 @@ function Base.put!(pool::ObjectPool{T}, obj::T) where T
     @lock pool.lock begin
         push!(pool.extra, obj)
     end
+    return
+end
+
+function Base.empty!(pool::ObjectPool)
+    @atomic :unordered pool.value = nothing
+    empty!(pool.extra)
     return
 end
 
