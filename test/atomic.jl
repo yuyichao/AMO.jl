@@ -1,6 +1,6 @@
 #
 
-module TestRand
+module TestAtomic
 
 using AMO: g_sum, g_s, g_l
 
