@@ -2,7 +2,7 @@
 
 using Base.Iterators
 
-function _precompile()
+let
     precompile(Math.genlaguerre, (Int, Float32, Float32))
     precompile(Math.genlaguerre, (Int, Float64, Float64))
     precompile(Math.genlaguerre, (Int, Float64, Int))
@@ -60,5 +60,3 @@ function _precompile()
         end
     end
 end
-
-_precompile()
