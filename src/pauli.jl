@@ -9,6 +9,8 @@ using Static
 
 using ..Utils: ThreadObjectPool
 
+public add!, sub!, mul!, div!, icomm, icomm!, Workspace, PauliOperators, OPToken
+
 mutable struct Workspace{T}
     const bitvec_cache::Vector{Vector{Int}}
     bitvec_used::Int

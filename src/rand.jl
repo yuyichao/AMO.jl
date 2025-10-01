@@ -4,6 +4,8 @@ module Rand
 
 using Random
 
+public RandSetBits, rand_setbits, RandDepol, Rand2QDepol
+
 _nbits(::Type{Bool}) = 1
 _nbits(::Type{T}) where T = sizeof(T) * 8
 

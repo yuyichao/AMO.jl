@@ -5,6 +5,9 @@ module Trap
 using ..Math: assoc_laguerre
 using SpecialFunctions
 
+export sideband, SidebandIter, thermal_population, ThermalPopulationIter, thermal_sideband
+public η
+
 const c = 299792458
 const h = 6.62607015e-34
 const ħ = h / 2π

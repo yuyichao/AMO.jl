@@ -4,6 +4,9 @@ module TimeSequence
 
 using StaticArrays
 
+public AbstractStep, support_inplace_compute, compute, compute!, set_params!,
+    get_init, get_mul, get_mul!, Sequence
+
 abstract type AbstractStep{OP,NParams} end
 
 @inline support_inplace_compute(T) = false
