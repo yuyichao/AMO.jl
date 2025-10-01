@@ -5,7 +5,6 @@ module Pauli
 using Base.Order
 
 import LinearAlgebra: mul!
-using DataStructures
 using Static
 
 using ..Utils: ThreadObjectPool
@@ -13,10 +12,12 @@ using ..Utils: ThreadObjectPool
 mutable struct Workspace{T}
     const bitvec_cache::Vector{Vector{Int}}
     bitvec_used::Int
-    const terms::SortedDict{Vector{Int},T,ForwardOrdering}
+    const termidx_map::Dict{Vector{Int},Int}
+    const terms::Vector{Tuple{Ptr{Nothing},T}}
     const visited::Vector{Bool}
     function Workspace{T}() where {T}
-        return new{T}(Vector{Int}[], 0, SortedDict{Vector{Int},T}(), Bool[])
+        return new{T}(Vector{Int}[], 0, Dict{Vector{Int},Int}(),
+                      Tuple{Ptr{Nothing},T}[], Bool[])
     end
 end
 
@@ -42,19 +43,25 @@ end
     end
 end
 
-function accumulate_term!(workspace::Workspace, bits::Vector{Int}, v)
-    st = findkey(workspace.terms, bits)
-    if st == pastendsemitoken(workspace.terms)
-        workspace.terms[bits] = v
-        return true
+@inline function accumulate_term!(workspace::Workspace, bits::Vector{Int}, v)
+    h = workspace.termidx_map
+    index, sh = Base.ht_keyindex2_shorthash!(h, bits)
+    found = index > 0
+    @inbounds if found
+        termidx = h.vals[index]
+        term = workspace.terms[termidx]
+        workspace.terms[termidx] = (term[1], term[2] + v)
+    else
+        push!(workspace.terms, (pointer_from_objref(bits), v))
+        Base._setindex!(h, length(workspace.terms), bits, -index, sh)
     end
-    @inbounds workspace.terms[st] += v
-    return false
+    return !found
 end
 
 function reset!(workspace::Workspace)
     workspace.bitvec_used = 0
     empty!(workspace.terms)
+    empty!(workspace.termidx_map)
     return
 end
 
@@ -71,8 +78,8 @@ function alloc_intvec(workspace::Workspace)
     return res
 end
 
-function mul_bits(workspace::Workspace, bits1, bits2, max_len,
-                  ::Val{anticommute}=Val(false)) where {anticommute}
+@inline function mul_bits(workspace::Workspace, bits1, bits2, max_len,
+                          ::Val{anticommute}=Val(false)) where {anticommute}
     phase = 0
     nbits1 = length(bits1)
     nbits2 = length(bits2)
@@ -314,10 +321,14 @@ function _record_term(v, bits, idx)
     return
 end
 
+@inline ptr_to_intvec(ptr) = ccall(:jl_value_ptr, Ref{Vector{Int}}, (Ptr{Nothing},), ptr)
+
 function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=false,
                     recorder=nothing) where {T}
     empty!(out)
-    for (bits, v) in workspace.terms
+    sort!(workspace.terms, by=@inline term->ptr_to_intvec(term[1]))
+    for (ptr, v) in workspace.terms
+        bits = ptr_to_intvec(ptr)
         nbits = length(bits)
         if nbits == 0
             _record_term(recorder, bits, 1)
