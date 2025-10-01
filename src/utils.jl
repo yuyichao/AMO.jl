@@ -48,8 +48,10 @@ function Base.get(pool::ThreadObjectPool{T}) where T
         array = pool.array
         oldlen = length(array)
         if id > oldlen
-            array = [i <= oldlen ? @inbounds(array[i]) : ObjSlot{T}(nothing)
-                     for i in 1:Threads.maxthreadid()]
+            array = let array=array
+                [i <= oldlen ? @inbounds(array[i]) : ObjSlot{T}(nothing)
+                 for i in 1:Threads.maxthreadid()]
+            end
             @atomic :release pool.array = array
         end
         if !isempty(pool.extra)
