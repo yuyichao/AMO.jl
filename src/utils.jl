@@ -22,17 +22,54 @@ mutable struct ThreadObjectPool{T,CB}
     # So access of the array member/size does not need to be atomic.
     # Access of the Atomic variables stored in the array should all be atomic exchanges
     # so that we never have duplicated/missing references to any objects.
-    @atomic array::Vector{ObjSlot{T}}
+    @atomic array::Memory{ObjSlot{T}}
     const extra::Vector{T} # Protected by lock
     function ThreadObjectPool(cb)
         obj = cb()
         T = typeof(obj)
-        array = [ObjSlot{T}(obj)]
+        array = Memory{ObjSlot{T}}(undef, 1)
+        @inbounds array[1] = ObjSlot{T}(obj)
         return new{T,_typeof(cb)}(ReentrantLock(), cb, array, T[])
     end
 end
 
-function Base.get(pool::ThreadObjectPool{T}) where T
+function _get_slow(pool::ThreadObjectPool{T}) where T
+    @lock pool.lock begin
+        if !isempty(pool.extra)
+            return pop!(pool.extra)
+        end
+        return pool.cb()::T
+    end
+end
+
+function _put_slow(pool::ThreadObjectPool{T}, obj::T, id) where T
+    @lock pool.lock begin
+        # Reload, in case someone else changed it
+        # No atomicity needed since the thread that may have changed it must
+        # have done so with the lock held.
+        array = @atomic :unordered pool.array
+        oldlen = length(array)
+        if id > oldlen
+            nt = Threads.maxthreadid()
+            new_array = Memory{ObjSlot{T}}(undef, nt)
+            @inbounds for i in 1:nt
+                if i <= oldlen
+                    new_array[i] = array[i]
+                elseif i == id
+                    new_array[i] = ObjSlot{T}(obj)
+                else
+                    new_array[i] = ObjSlot{T}(nothing)
+                end
+            end
+            @atomic :release pool.array = new_array
+        else
+            push!(pool.extra, obj)
+        end
+    end
+    return
+end
+
+@inline function Base.get(pool::ThreadObjectPool{T}) where T
     array = @atomic :acquire pool.array
     id = Threads.threadid()
     if id <= length(array)
@@ -41,27 +78,10 @@ function Base.get(pool::ThreadObjectPool{T}) where T
             return obj::T
         end
     end
-    @lock pool.lock begin
-        # Reload, in case someone else changed it
-        # No atomicity needed since the thread that may have changed it must
-        # have done so with the lock held.
-        array = pool.array
-        oldlen = length(array)
-        if id > oldlen
-            array = let array=array
-                [i <= oldlen ? @inbounds(array[i]) : ObjSlot{T}(nothing)
-                 for i in 1:Threads.maxthreadid()]
-            end
-            @atomic :release pool.array = array
-        end
-        if !isempty(pool.extra)
-            return pop!(pool.extra)
-        end
-        return pool.cb()::T
-    end
+    return _get_slow(pool)
 end
 
-function Base.put!(pool::ThreadObjectPool{T}, obj::T) where T
+@inline function Base.put!(pool::ThreadObjectPool{T}, obj::T) where T
     array = @atomic :acquire pool.array
     id = Threads.threadid()
     if id <= length(array)
@@ -70,16 +90,16 @@ function Base.put!(pool::ThreadObjectPool{T}, obj::T) where T
             return
         end
     end
-    @lock pool.lock begin
-        push!(pool.extra, obj)
-    end
-    return
+    _put_slow(pool, obj, id)
 end
 
-function Base.empty!(pool::ThreadObjectPool)
+function Base.empty!(pool::ThreadObjectPool{T}) where T
     array = @atomic :unordered pool.array
-    resize!(array, 1)
-    @atomic :unordered array[1].value = nothing
+    ele1 = @inbounds array[1]
+    @atomic :unordered ele1.value = nothing
+    new_array = Memory{ObjSlot{T}}(undef, 1)
+    @inbounds new_array[1] = ele1
+    @atomic :release pool.array = new_array
     empty!(pool.extra)
     return
 end
@@ -101,11 +121,7 @@ mutable struct ObjectPool{T,CB}
     end
 end
 
-function Base.get(pool::ObjectPool{T}) where T
-    obj = @atomicswap(:acquire_release, pool.value = nothing)
-    if obj !== nothing
-        return obj::T
-    end
+function _get_slow(pool::ObjectPool{T}) where T
     @lock pool.lock begin
         if !isempty(pool.extra)
             return pop!(pool.extra)
@@ -114,15 +130,27 @@ function Base.get(pool::ObjectPool{T}) where T
     end
 end
 
+function _put_slow(pool::ObjectPool{T}, obj::T) where T
+    @lock pool.lock begin
+        push!(pool.extra, obj)
+    end
+    return
+end
+
+@inline function Base.get(pool::ObjectPool{T}) where T
+    obj = @atomicswap(:acquire_release, pool.value = nothing)
+    if obj !== nothing
+        return obj::T
+    end
+    return _get_slow(pool)
+end
+
 function Base.put!(pool::ObjectPool{T}, obj::T) where T
     obj = @atomicswap(:acquire_release, pool.value = obj)
     if obj === nothing
         return
     end
-    @lock pool.lock begin
-        push!(pool.extra, obj)
-    end
-    return
+    _put_slow(pool, obj)
 end
 
 function Base.empty!(pool::ObjectPool)
