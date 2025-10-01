@@ -637,7 +637,7 @@ function apply_phase(v, phase)
     rv = real(v)
     iv = imag(v)
     if phase == 0
-        return v
+        return complex(v)
     elseif phase == 1
         return complex(-iv, rv)
     elseif phase == 2
