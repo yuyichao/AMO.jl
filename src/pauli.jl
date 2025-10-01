@@ -18,7 +18,7 @@ mutable struct Workspace{T}
     const termidx_map::Dict{Vector{Int32},Int32}
     const terms::Vector{Tuple{Ptr{Nothing},T}}
     const visited::Vector{Bool}
-    function Workspace{T}() where {T}
+    function Workspace{T}() where T
         return new{T}(Vector{Int32}[], 0, Dict{Vector{Int32},Int32}(),
                       Tuple{Ptr{Nothing},T}[], Bool[])
     end
@@ -73,7 +73,13 @@ end
     return ccall(:jl_value_ptr, Ref{T}, (Ptr{Nothing},), ptr)
 end
 
-function alloc_intvec(workspace::Workspace)
+@noinline function _alloc_intvec(workspace::Workspace)
+    res = Int32[]
+    push!(workspace.bitvec_cache, res)
+    return res
+end
+
+@inline function alloc_intvec(workspace::Workspace)
     idx = workspace.bitvec_used + 1
     workspace.bitvec_used = idx
     if idx <= length(workspace.bitvec_cache)
@@ -81,9 +87,7 @@ function alloc_intvec(workspace::Workspace)
         empty!(res)
         return res
     end
-    res = Int32[]
-    push!(workspace.bitvec_cache, res)
-    return res
+    return _alloc_intvec(workspace)
 end
 
 @inline function mul_bits(workspace::Workspace, bits1, bits2, max_len,
@@ -178,7 +182,7 @@ mutable struct PauliOperators{T}
     # Lazily populated arrays to identify which term contains the corresponding qubit
     const terms_map::Memory{Vector{Int32}}
     const max_len::Int
-    function PauliOperators{T}(nbits; max_len=3) where {T}
+    function PauliOperators{T}(nbits; max_len=3) where T
         terms_map = Memory{Vector{Int32}}(undef, nbits)
         @inbounds for i in 1:nbits
             terms_map[i] = Int32[]
@@ -331,10 +335,11 @@ end
 
 @inline ptr_to_intvec(ptr) = ccall(:jl_value_ptr, Ref{Vector{Int32}}, (Ptr{Nothing},), ptr)
 
-function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=false,
-                    recorder=nothing) where {T}
+@inline function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=false,
+                            recorder=nothing) where T
     empty!(out)
-    sort!(workspace.terms, by=(@inline term->ptr_to_intvec(term[1])), alg=Sort.QuickSort)
+    @inline sort!(workspace.terms, by=(@inline term->ptr_to_intvec(term[1])),
+                  alg=Sort.QuickSort)
     for (ptr, v) in workspace.terms
         bits = ptr_to_intvec(ptr)
         nbits = length(bits)
@@ -354,7 +359,7 @@ function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=fals
 end
 
 function PauliOperators{T}(nbits, terms; max_len=3, workspace=nothing,
-                           terms_recorder=nothing) where {T}
+                           terms_recorder=nothing) where T
     op = PauliOperators{T}(nbits, max_len=max_len)
     return with_workspace(T, workspace) do workspace
         for (bits, v) in terms
@@ -466,14 +471,7 @@ end
     return op
 end
 
-function _ensure_terms_map(op::PauliOperators{T}) where T
-    if isempty(op.term_bits)
-        return
-    end
-    # Assume that the map is either empty or fully filled
-    @inbounds if !isempty(op.terms_map[op.term_bits[1] >> 2])
-        return
-    end
+function _populate_terms_map(op::PauliOperators)
     @inbounds for (termidx, term) in enumerate(op.terms)
         nbits = term.bits & 255
         offset = term.bits >> 8
@@ -483,13 +481,25 @@ function _ensure_terms_map(op::PauliOperators{T}) where T
     end
 end
 
+@inline function _ensure_terms_map(op::PauliOperators)
+    if isempty(op.term_bits)
+        return
+    end
+    # Assume that the map is either empty or fully filled
+    @inbounds if !isempty(op.terms_map[op.term_bits[1] >> 2])
+        return
+    end
+    _populate_terms_map(op)
+end
+
 # Internal function for operator construction only.
 @inline function _add_term!(op::PauliOperators{T}, v, bits) where T
     nbits = length(bits)
-    old_bitlen = length(op.term_bits)
-    resize!(op.term_bits, old_bitlen + nbits)
+    term_bits = op.term_bits
+    old_bitlen = length(term_bits)
+    resize!(term_bits, old_bitlen + nbits)
     @inbounds @simd for i in 1:nbits
-        op.term_bits[old_bitlen + i] = bits[i]
+        term_bits[old_bitlen + i] = bits[i]
     end
     push!(op.terms, Term{T}(v, (old_bitlen << 8) | nbits))
 end
@@ -503,16 +513,18 @@ end
     return tgt
 end
 
+@noinline throw_bit_error() = throw(ArgumentError("Destination bit count too small"))
+
 @inline function check_nbits(tgt::PauliOperators, src::PauliOperators)
     nbits = length(tgt.terms_map)
     if length(src.terms_map) > nbits
-        throw(ArgumentError("Destination bit count too small"))
+        throw_bit_error()
     end
     return nbits
 end
 @inline function check_nbits(nbits::Integer, src::PauliOperators)
     if length(src.terms_map) > nbits
-        throw(ArgumentError("Destination bit count too small"))
+        throw_bit_error()
     end
     return nbits
 end
