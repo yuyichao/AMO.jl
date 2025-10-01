@@ -69,6 +69,7 @@ end
 
 @testset "PauliOperators{$T}" for T in [Float32, Float64, ComplexF32, ComplexF64]
     POT = PauliOperators{T}
+    POCT = PauliOperators{complex(T)}
 
     op0 = POT(10)
     check_consistent(op0)
@@ -190,11 +191,13 @@ end
     check_consistent(ic6_7)
     @test ic6_7 ≈ POT(10, Dict("X₁X₂X₃"=>2.6, "X₁Z₂Z₃"=>4.8, "Z₁Y₂Z₃X₉"=>0.24), max_len=4)
     @test ic6_7 ≈ -Pauli.icomm!(POT(10, max_len=5), op7, op6)
+    @test ic6_7 ≈ im * (mul!(POCT(10, max_len=5), op6, op7) - mul!(POCT(10, max_len=5), op7, op6))
 
     ic6_7′ = Pauli.icomm(op6, op7)
     check_consistent(ic6_7′)
     @test ic6_7′ ≈ POT(10, Dict("X₁X₂X₃"=>2.6, "X₁Z₂Z₃"=>4.8))
     @test ic6_7′ ≈ -Pauli.icomm(op7, op6)
+    @test ic6_7′ ≈ im * (mul!(POCT(10), op6, op7) - mul!(POCT(10), op7, op6))
 
     @test Pauli.icomm(op6, op6) == POT(10)
     @test Pauli.icomm(op7, op7) == POT(10)

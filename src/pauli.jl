@@ -621,7 +621,10 @@ function add!(out::PauliOperators{T}, A::PauliOperators, ca::Number,
     max_len = out.max_len
     foreach_nzterms(A::PauliOperators, B::PauliOperators) do bits, va, vb
         if length(bits) <= max_len
-            _add_term!(out, va * ca + vb * cb, bits)
+            v = va * ca + vb * cb
+            if v != 0
+                _add_term!(out, v, bits)
+            end
         end
     end
     return out
