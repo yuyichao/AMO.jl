@@ -33,6 +33,11 @@ mutable struct ThreadObjectPool{T,CB}
     end
 end
 
+@inline function _get_slot(array::Memory{ObjSlot{T}}, i) where T
+    ptr = Base.pointerref(Ptr{Ptr{Nothing}}(pointer(array, i)), 1, sizeof(C_NULL))
+    return ccall(:jl_value_ptr, Ref{ObjSlot{T}}, (Ptr{Nothing},), ptr)
+end
+
 function _get_slow(pool::ThreadObjectPool{T}) where T
     @lock pool.lock begin
         if !isempty(pool.extra)
@@ -54,7 +59,7 @@ function _put_slow(pool::ThreadObjectPool{T}, obj::T, id) where T
             new_array = Memory{ObjSlot{T}}(undef, nt)
             @inbounds for i in 1:nt
                 if i <= oldlen
-                    new_array[i] = array[i]
+                    new_array[i] = _get_slot(array, i)
                 elseif i == id
                     new_array[i] = ObjSlot{T}(obj)
                 else
@@ -73,7 +78,7 @@ end
     array = @atomic :acquire pool.array
     id = Threads.threadid()
     if id <= length(array)
-        obj = @atomicswap(:acquire_release, @inbounds(array[id]).value = nothing)
+        obj = @atomicswap(:acquire_release, _get_slot(array, id).value = nothing)
         if obj !== nothing
             return obj::T
         end
@@ -85,7 +90,7 @@ end
     array = @atomic :acquire pool.array
     id = Threads.threadid()
     if id <= length(array)
-        obj = @atomicswap(:acquire_release, @inbounds(array[id]).value = obj)
+        obj = @atomicswap(:acquire_release, _get_slot(array, id).value = obj)
         if obj === nothing
             return
         end
@@ -95,7 +100,7 @@ end
 
 function Base.empty!(pool::ThreadObjectPool{T}) where T
     array = @atomic :unordered pool.array
-    ele1 = @inbounds array[1]
+    ele1 = _get_slot(array, 1)
     @atomic :unordered ele1.value = nothing
     new_array = Memory{ObjSlot{T}}(undef, 1)
     @inbounds new_array[1] = ele1

@@ -67,11 +67,16 @@ function reset!(workspace::Workspace)
     return
 end
 
+@inline function load_ptrarray(array::Vector{T}, i) where T
+    ptr = Base.pointerref(Ptr{Ptr{Nothing}}(pointer(array, i)), 1, sizeof(C_NULL))
+    return ccall(:jl_value_ptr, Ref{T}, (Ptr{Nothing},), ptr)
+end
+
 function alloc_intvec(workspace::Workspace)
     idx = workspace.bitvec_used + 1
     workspace.bitvec_used = idx
     if idx <= length(workspace.bitvec_cache)
-        res = @inbounds workspace.bitvec_cache[idx]
+        res = load_ptrarray(workspace.bitvec_cache, idx)
         empty!(res)
         return res
     end
