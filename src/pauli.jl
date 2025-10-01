@@ -3,6 +3,7 @@
 module Pauli
 
 using Base.Order
+using Base.Sort
 
 import LinearAlgebra: mul!
 using Static
@@ -333,7 +334,7 @@ end
 function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=false,
                     recorder=nothing) where {T}
     empty!(out)
-    sort!(workspace.terms, by=@inline term->ptr_to_intvec(term[1]))
+    sort!(workspace.terms, by=(@inline term->ptr_to_intvec(term[1])), alg=Sort.QuickSort)
     for (ptr, v) in workspace.terms
         bits = ptr_to_intvec(ptr)
         nbits = length(bits)
