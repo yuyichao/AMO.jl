@@ -30,10 +30,13 @@ end
     return pool
 end
 
-@inline function with_workspace(@specialize(cb), ::Type{T}, workspace=nothing) where T
+const RST_BITVEC = static(1)
+const RST_TERMS = static(2)
+
+@inline function with_workspace(@specialize(cb), ::Type{T}, workspace, rst_flag) where T
     if workspace !== nothing
         res = @inline cb(workspace)
-        reset!(workspace)
+        reset!(workspace, rst_flag)
         return res
     end
     pool = _workspace_pool(T)
@@ -41,7 +44,7 @@ end
     try
         return @inline cb(workspace)
     finally
-        reset!(workspace)
+        reset!(workspace, rst_flag)
         put!(pool, workspace)
     end
 end
@@ -61,10 +64,14 @@ end
     return !found
 end
 
-@inline function reset!(workspace::Workspace)
-    workspace.bitvec_used = 0
-    empty!(workspace.terms)
-    empty!(workspace.termidx_map)
+@inline function reset!(workspace::Workspace, rst_flag)
+    if (rst_flag & RST_BITVEC) != 0
+        workspace.bitvec_used = 0
+    end
+    if (rst_flag & RST_TERMS) != 0
+        empty!(workspace.terms)
+        empty!(workspace.termidx_map)
+    end
     return
 end
 
@@ -321,7 +328,7 @@ function findterm(op::PauliOperators{T}, bits; workspace=nothing) where T
     if isempty(bits)
         return OPToken(1)
     end
-    return with_workspace(T, workspace) do workspace
+    return with_workspace(T, workspace, RST_BITVEC) do workspace
         return _findterm(op, parse_bits!(alloc_intvec(workspace),
                                          bits, length(op.terms_map)))
     end
@@ -354,14 +361,13 @@ end
         _add_term!(out, v, bits)
         _record_term(recorder, bits, length(out.terms))
     end
-    reset!(workspace)
     return out
 end
 
 function PauliOperators{T}(nbits, terms; max_len=3, workspace=nothing,
                            terms_recorder=nothing) where T
     op = PauliOperators{T}(nbits, max_len=max_len)
-    return with_workspace(T, workspace) do workspace
+    return with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         for (bits, v) in terms
             bits = parse_bits!(alloc_intvec(workspace), bits, nbits)
             if length(bits) > max_len
@@ -653,7 +659,7 @@ end
 @inline function mul!(out::PauliOperators{T}, A::PauliOperators,
                       B::PauliOperators; workspace=nothing) where T
     check_nbits(check_nbits(out, A), B)
-    with_workspace(T, workspace) do workspace
+    with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
         @inbounds for terma in A.terms
             bitsa = get_bits(A, terma)
@@ -690,7 +696,7 @@ end
                         B::PauliOperators; workspace=nothing) where T
     nbits = check_nbits(check_nbits(out, A), B)
     _ensure_terms_map(B)
-    with_workspace(T, workspace) do workspace
+    with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
         visited = workspace.visited
         resize!(visited, nbits)
