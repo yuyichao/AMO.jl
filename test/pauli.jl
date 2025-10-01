@@ -12,12 +12,12 @@ function check_consistent(op::PauliOperators{T}) where {T}
     @test length(op.terms) >= 1
     last_offset = 0
     last_bits = Pauli.get_bits(op, op.terms[1])
-    @test Pauli.findterm(op, Int[]) == OPToken(1)
-    @test Pauli.findterm(op, Int[]; workspace=ws) == OPToken(1)
+    @test Pauli.findterm(op, Int32[]) == OPToken(1)
+    @test Pauli.findterm(op, Int32[]; workspace=ws) == OPToken(1)
     @test ws.bitvec_used == 0
     @test isvalid(op, OPToken(1))
     @test !isvalid(op, OPToken(0))
-    @test op[Int[]] == op[OPToken(1)] == op.terms[1].v
+    @test op[Int32[]] == op[OPToken(1)] == op.terms[1].v
     maxbit = 0
     for (i, term) in enumerate(op.terms)
         if i == 1
@@ -56,7 +56,7 @@ function check_consistent(op::PauliOperators{T}) where {T}
     if all(isempty, op.terms_map)
         return
     end
-    terms_map = [Int[] for i in 1:length(op.terms_map)]
+    terms_map = [Int32[] for i in 1:length(op.terms_map)]
     for (termidx, term) in enumerate(op.terms)
         for bit in Pauli.get_bits(op, term)
             push!(terms_map[bit >> 2], termidx)
@@ -73,7 +73,7 @@ end
     op0 = POT(10)
     check_consistent(op0)
     @test sprint(show, op0) == "0.0"
-    op0[Int[]] = 1.2
+    op0[Int32[]] = 1.2
     check_consistent(op0)
     @test sprint(show, op0) == "1.2"
     op0[OPToken(1)] = 2.3
@@ -117,12 +117,12 @@ end
     @test op1[[(:X, 10), ("z", 3), (:y, 1)]] == T(-0.2)
     @test op1[[(:X, 10), ("z", 3), (:y, 1)]] == T(-0.2)
 
-    recorder = Dict{Vector{Int},OPToken}()
+    recorder = Dict{Vector{Int32},OPToken}()
     op1′ = POT(10, Dict("i"=>-0.3, "X1Y2"=>1.2, "Z3Y1X₁₀ "=>-0.2),
                             terms_recorder=recorder)
-    @test recorder == Dict(Int[]=>OPToken(1),
-                           [4 + 1, 8 + 3]=>OPToken(2),
-                           [4 + 3, 12 + 2, 40 + 1]=>OPToken(3))
+    @test recorder == Dict(Int32[]=>OPToken(1),
+                           Int32[4 + 1, 8 + 3]=>OPToken(2),
+                           Int32[4 + 3, 12 + 2, 40 + 1]=>OPToken(3))
     check_consistent(op1′)
     @test sprint(show, op1′) == "-0.3 + 1.2 * X₁Y₂ - 0.2 * Y₁Z₃X₁₀"
 

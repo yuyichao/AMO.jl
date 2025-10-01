@@ -13,13 +13,13 @@ using ..Utils: ThreadObjectPool
 public add!, sub!, mul!, div!, icomm, icomm!, Workspace, PauliOperators, OPToken
 
 mutable struct Workspace{T}
-    const bitvec_cache::Vector{Vector{Int}}
+    const bitvec_cache::Vector{Vector{Int32}}
     bitvec_used::Int
-    const termidx_map::Dict{Vector{Int},Int}
+    const termidx_map::Dict{Vector{Int32},Int32}
     const terms::Vector{Tuple{Ptr{Nothing},T}}
     const visited::Vector{Bool}
     function Workspace{T}() where {T}
-        return new{T}(Vector{Int}[], 0, Dict{Vector{Int},Int}(),
+        return new{T}(Vector{Int32}[], 0, Dict{Vector{Int32},Int32}(),
                       Tuple{Ptr{Nothing},T}[], Bool[])
     end
 end
@@ -46,22 +46,22 @@ end
     end
 end
 
-@inline function accumulate_term!(workspace::Workspace, bits::Vector{Int}, v)
+@inline function accumulate_term!(workspace::Workspace, bits::Vector{Int32}, v)
     h = workspace.termidx_map
     index, sh = Base.ht_keyindex2_shorthash!(h, bits)
     found = index > 0
     @inbounds if found
-        termidx = h.vals[index]
+        termidx = Int(h.vals[index])
         term = workspace.terms[termidx]
         workspace.terms[termidx] = (term[1], term[2] + v)
     else
         push!(workspace.terms, (pointer_from_objref(bits), v))
-        Base._setindex!(h, length(workspace.terms), bits, -index, sh)
+        Base._setindex!(h, length(workspace.terms) % Int32, bits, -index, sh)
     end
     return !found
 end
 
-function reset!(workspace::Workspace)
+@inline function reset!(workspace::Workspace)
     workspace.bitvec_used = 0
     empty!(workspace.terms)
     empty!(workspace.termidx_map)
@@ -81,7 +81,7 @@ function alloc_intvec(workspace::Workspace)
         empty!(res)
         return res
     end
-    res = Int[]
+    res = Int32[]
     push!(workspace.bitvec_cache, res)
     return res
 end
@@ -155,9 +155,9 @@ end
     return res, phase
 end
 
-@eval primitive type OPToken $(sizeof(Int) * 8) end
-OPToken(v::Int) = reinterpret(OPToken, v)
-Base.Int(v::OPToken) = reinterpret(Int, v)
+@eval primitive type OPToken 32 end
+OPToken(v::Int) = reinterpret(OPToken, v % Int32)
+Base.Int(v::OPToken) = reinterpret(Int32, v) % Int
 
 struct Term{T}
     # coefficient
@@ -174,16 +174,16 @@ mutable struct PauliOperators{T}
     # Array storing the bit pattern for each term
     # The last two bits of each number represents which pauli matrix (1: X, 2: Y, 3: Z)
     # is present for the term, the upper bits of the number represent the bit index.
-    const term_bits::Vector{Int}
+    const term_bits::Vector{Int32}
     # Lazily populated arrays to identify which term contains the corresponding qubit
-    const terms_map::Memory{Vector{Int}}
+    const terms_map::Memory{Vector{Int32}}
     const max_len::Int
     function PauliOperators{T}(nbits; max_len=3) where {T}
-        terms_map = Memory{Vector{Int}}(undef, nbits)
+        terms_map = Memory{Vector{Int32}}(undef, nbits)
         @inbounds for i in 1:nbits
-            terms_map[i] = Int[]
+            terms_map[i] = Int32[]
         end
-        return new{T}([Term{T}(0, 0)], Int[], terms_map, max_len)
+        return new{T}([Term{T}(0, 0)], Int32[], terms_map, max_len)
     end
 end
 
@@ -296,7 +296,7 @@ function parse_bits!(bits, input, nbits)
     return bits
 end
 
-function _findterm(op::PauliOperators, bits::AbstractVector{Int})
+function _findterm(op::PauliOperators, bits::AbstractVector{Int32})
     lb = 1
     ub = length(op.terms)
     while ub >= lb
@@ -329,7 +329,7 @@ function _record_term(v, bits, idx)
     return
 end
 
-@inline ptr_to_intvec(ptr) = ccall(:jl_value_ptr, Ref{Vector{Int}}, (Ptr{Nothing},), ptr)
+@inline ptr_to_intvec(ptr) = ccall(:jl_value_ptr, Ref{Vector{Int32}}, (Ptr{Nothing},), ptr)
 
 function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=false,
                     recorder=nothing) where {T}
@@ -456,7 +456,7 @@ function Base.show(io::IO, op::PauliOperators)
     end
 end
 
-function Base.empty!(op::PauliOperators{T}) where T
+@inline function Base.empty!(op::PauliOperators{T}) where T
     resize!(op.terms, 1)
     @inbounds op.terms[1] = Term{T}(0, op.terms[1].bits)
     empty!(op.term_bits)
