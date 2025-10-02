@@ -758,7 +758,7 @@ function Base.isapprox(A::PauliOperators, B::PauliOperators; kws...)
     max_len = min(A.max_len, B.max_len)
     res = Ref(true)
     foreach_nzterms(A::PauliOperators, B::PauliOperators) do bits, va, vb
-        res[] &= isapprox(va, vb, kws...)
+        res[] &= isapprox(va, vb; kws...)
     end
     return res[]
 end
