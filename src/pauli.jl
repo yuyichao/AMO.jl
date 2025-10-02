@@ -701,8 +701,8 @@ function apply_phase(v, phase)
     end
 end
 
-@inline function mul!(out::PauliOperators{T}, A::PauliOperators,
-                      B::PauliOperators; workspace=nothing) where T
+function mul!(out::PauliOperators{T}, A::PauliOperators,
+              B::PauliOperators; workspace=nothing) where T
     with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
         termsa = PVector(A.terms)
@@ -741,8 +741,8 @@ end
 end
 
 # out = i[A, B]
-@inline function icomm!(out::PauliOperators{T}, A::PauliOperators,
-                        B::PauliOperators; workspace=nothing) where T
+function icomm!(out::PauliOperators{T}, A::PauliOperators,
+                B::PauliOperators; workspace=nothing) where T
     if isempty(A.term_bits) || isempty(B.term_bits)
         empty!(out)
         return out
