@@ -65,11 +65,11 @@ let
     for T in [Float32, Float64, ComplexF32, ComplexF64]
         ws = Pauli.Workspace{T}()
         PO = Pauli.PauliOperators{T}
-        op = PO(1, ["X1"=>0.1])
-        PO(1, ["X1"=>0.1]; max_len=1, workspace=ws,
+        op = PO(["X1"=>0.1])
+        PO(["X1"=>0.1]; max_len=1, workspace=ws,
            terms_recorder=Dict{Vector{Int},Pauli.OPToken}())
-        PO(1; max_len=1)
-        empty!(PO(1))
+        PO(max_len=1)
+        empty!(PO())
         precompile(isvalid, (PO, Pauli.OPToken))
         precompile(getindex, (PO, Pauli.OPToken))
         precompile(setindex!, (PO, T, Pauli.OPToken))
@@ -96,11 +96,11 @@ let
         muladd(real(T)(0.1), op, op)
         muladd(complex(T)(0.1), op, op)
         op * op
-        Pauli.mul!(PO(1), op, op)
-        Pauli.mul!(PO(1), op, op, workspace=ws)
+        Pauli.mul!(PO(), op, op)
+        Pauli.mul!(PO(), op, op, workspace=ws)
         Pauli.icomm(op, op)
         Pauli.icomm(op, op, workspace=ws)
-        Pauli.icomm!(PO(1), op, op)
-        Pauli.icomm!(PO(1), op, op, workspace=ws)
+        Pauli.icomm!(PO(), op, op)
+        Pauli.icomm!(PO(), op, op, workspace=ws)
     end
 end

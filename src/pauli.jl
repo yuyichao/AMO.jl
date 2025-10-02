@@ -187,15 +187,11 @@ mutable struct PauliOperators{T}
     # is present for the term, the upper bits of the number represent the bit index.
     const term_bits::Vector{Int32}
     # Lazily populated arrays to identify which term contains the corresponding qubit
-    const terms_map::Memory{Vector{Int32}}
-    nbits::UInt32
+    const terms_map_offsets::Vector{Int32}
+    const terms_map::Vector{Int32}
     max_len::UInt8
-    function PauliOperators{T}(nbits; max_len=3) where T
-        terms_map = Memory{Vector{Int32}}(undef, nbits)
-        @inbounds for i in 1:nbits
-            terms_map[i] = Int32[]
-        end
-        return new{T}([Term{T}(0, 0)], Int32[], terms_map, nbits, max_len)
+    function PauliOperators{T}(; max_len=3) where T
+        return new{T}([Term{T}(0, 0)], Int32[], Int32[], Int32[], max_len)
     end
 end
 
@@ -289,16 +285,14 @@ function _parse_bits!(res, bitstr::AbstractString)
     _add_bit(res, idx, typ, bitstr)
 end
 
-function parse_bits!(bits, input, nbits)
+function parse_bits!(bits, input)
     _parse_bits!(bits, input)
     last_bitidx = 0
     sort!(bits)
     for bit in bits
         bitidx = bit >> 2
         typ = bit & 3
-        if bitidx > nbits
-            throw(ArgumentError("Bit index out of range"))
-        elseif bitidx <= last_bitidx
+        if bitidx <= last_bitidx
             throw(ArgumentError("Duplicated bit index"))
         elseif typ == 0
             throw(ArgumentError("Invalid Pauli operator type: $typ"))
@@ -330,8 +324,7 @@ function findterm(op::PauliOperators{T}, bits; workspace=nothing) where T
         return OPToken(1)
     end
     return with_workspace(T, workspace, RST_BITVEC) do workspace
-        return _findterm(op, parse_bits!(alloc_intvec(workspace),
-                                         bits, op.nbits))
+        return _findterm(op, parse_bits!(alloc_intvec(workspace), bits))
     end
 end
 
@@ -365,12 +358,12 @@ end
     return out
 end
 
-function PauliOperators{T}(nbits, terms; max_len=3, workspace=nothing,
+function PauliOperators{T}(terms; max_len=3, workspace=nothing,
                            terms_recorder=nothing) where T
-    op = PauliOperators{T}(nbits, max_len=max_len)
+    op = PauliOperators{T}(max_len=max_len)
     return with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         for (bits, v) in terms
-            bits = parse_bits!(alloc_intvec(workspace), bits, nbits)
+            bits = parse_bits!(alloc_intvec(workspace), bits)
             if length(bits) > max_len
                 throw(ArgumentError("Term too long"))
             end
@@ -383,13 +376,11 @@ function PauliOperators{T}(nbits, terms; max_len=3, workspace=nothing,
 end
 
 _empty(op::PauliOperators{T1}, ::Type{T2}) where {T1,T2} =
-    PauliOperators{promote_type(T1, T2)}(Int(op.nbits), max_len=op.max_len)
+    PauliOperators{promote_type(T1, T2)}(max_len=op.max_len)
 _empty(op1::PauliOperators{T1}, op2::PauliOperators{T2}) where {T1,T2} =
-    PauliOperators{promote_type(T1, T2)}(Int(max(op1.nbits, op2.nbits)),
-                                         max_len=max(op1.max_len, op2.max_len))
+    PauliOperators{promote_type(T1, T2)}(max_len=max(op1.max_len, op2.max_len))
 _empty(op1::PauliOperators{T1}, op2::PauliOperators{T2}, ::Type{T3}) where {T1,T2,T3} =
-    PauliOperators{promote_type(T1, T2, T3)}(Int(max(op1.nbits, op2.nbits)),
-                                             max_len=max(op1.max_len, op2.max_len))
+    PauliOperators{promote_type(T1, T2, T3)}(max_len=max(op1.max_len, op2.max_len))
 
 Base.:(==)(op1::PauliOperators, op2::PauliOperators) =
     op1.terms == op2.terms && op1.term_bits == op2.term_bits
@@ -472,28 +463,49 @@ end
     resize!(op.terms, 1)
     @inbounds op.terms[1] = Term{T}(0, op.terms[1].bits)
     empty!(op.term_bits)
-    for bit_term in op.terms_map
-        empty!(bit_term)
-    end
+    empty!(op.terms_map)
+    empty!(op.terms_map_offsets)
     return op
 end
 
 function _populate_terms_map(op::PauliOperators)
+    offsets = op.terms_map_offsets
+    maxbit = 0
+    @inbounds for bit in op.term_bits
+        bitidx = bit >> 2
+        if bitidx > maxbit
+            resize!(offsets, bitidx + 1)
+            for i in maxbit + 1:bitidx - 1
+                offsets[i + 1] = Int32(0)
+            end
+            offsets[bitidx + 1] = Int32(1)
+            maxbit = bitidx
+        else
+            offsets[bitidx + 1] += Int32(1)
+        end
+    end
+    total_bits::Int32 = 0
+    @inbounds offsets[1] = 0
+    @inbounds for i in 1:maxbit
+        cnt = offsets[i + 1]
+        offsets[i + 1] = total_bits
+        total_bits += cnt
+    end
+    terms_map = op.terms_map
+    resize!(terms_map, length(op.term_bits))
     @inbounds for (termidx, term) in enumerate(op.terms)
-        nbits = term.bits & 255
-        offset = term.bits >> 8
-        @inbounds for i in offset + 1:offset + nbits
-            push!(op.terms_map[op.term_bits[i] >> 2], termidx)
+        for bit in get_bits(op, term)
+            bitidx = bit >> 2
+            mapidx = offsets[bitidx + 1] + 1
+            offsets[bitidx + 1] = mapidx
+            terms_map[mapidx] = termidx
         end
     end
 end
 
 @inline function _ensure_terms_map(op::PauliOperators)
-    if isempty(op.term_bits)
-        return
-    end
     # Assume that the map is either empty or fully filled
-    @inbounds if !isempty(op.terms_map[op.term_bits[1] >> 2])
+    if !isempty(op.terms_map)
         return
     end
     _populate_terms_map(op)
@@ -522,22 +534,7 @@ end
 
 @noinline throw_bit_error() = throw(ArgumentError("Destination bit count too small"))
 
-@inline function check_nbits(tgt::PauliOperators, src::PauliOperators)
-    nbits = tgt.nbits
-    if src.nbits > nbits
-        throw_bit_error()
-    end
-    return nbits
-end
-@inline function check_nbits(nbits::Integer, src::PauliOperators)
-    if src.nbits > nbits
-        throw_bit_error()
-    end
-    return nbits
-end
-
 function mul!(out::PauliOperators{T}, op::PauliOperators, scale::Number) where T
-    nbits = check_nbits(out, op)
     max_len = out.max_len
     if max_len < op.max_len
         empty!(out)
@@ -551,9 +548,8 @@ function mul!(out::PauliOperators{T}, op::PauliOperators, scale::Number) where T
             end
         end
     else
-        @inbounds for i in 1:nbits
-            _copy_vec!(out.terms_map[i], op.terms_map[i])
-        end
+        _copy_vec!(out.terms_map_offsets, op.terms_map_offsets)
+        _copy_vec!(out.terms_map, op.terms_map)
         _copy_vec!(out.term_bits, op.term_bits)
         nterms = length(op.terms)
         resize!(out.terms, nterms)
@@ -622,7 +618,6 @@ end
 
 function add!(out::PauliOperators{T}, A::PauliOperators, ca::Number,
               B::PauliOperators, cb::Number) where T
-    check_nbits(check_nbits(out, A), B)
     empty!(out)
     @inbounds out.terms[1] = Term{T}(A.terms[1].v * ca + B.terms[1].v * cb, out.terms[1].bits)
     max_len = out.max_len
@@ -659,7 +654,6 @@ end
 
 @inline function mul!(out::PauliOperators{T}, A::PauliOperators,
                       B::PauliOperators; workspace=nothing) where T
-    check_nbits(check_nbits(out, A), B)
     with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
         @inbounds for terma in A.terms
@@ -695,20 +689,28 @@ end
 # out = i[A, B]
 @inline function icomm!(out::PauliOperators{T}, A::PauliOperators,
                         B::PauliOperators; workspace=nothing) where T
-    nbits = check_nbits(check_nbits(out, A), B)
+    if isempty(A.term_bits) || isempty(B.term_bits)
+        empty!(out)
+        return out
+    end
     _ensure_terms_map(B)
     with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
         visited = workspace.visited
-        resize!(visited, nbits)
+        map_offsetsb = B.terms_map_offsets
+        maxbitb = length(map_offsetsb) - 1
+        resize!(visited, maxbitb)
         @inbounds for terma in A.terms
             bitsa = get_bits(A, terma)
             fill!(visited, false)
             for bita in bitsa
                 bitidxa = bita >> 2
+                if bitidxa > maxbitb
+                    break
+                end
                 visited[bitidxa] = true
-                for idxb in B.terms_map[bitidxa]
-                    termb = B.terms[idxb]
+                for mapidx in map_offsetsb[bitidxa] + 1:map_offsetsb[bitidxa + 1]
+                    termb = B.terms[B.terms_map[mapidx]]
                     bitsb = get_bits(B, termb)
                     if check_visited(visited, bitidxa, bitsb)
                         continue
