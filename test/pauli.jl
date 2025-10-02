@@ -72,22 +72,24 @@ function check_consistent(op::PauliOperators{T}) where {T}
     end
 end
 
-@testset "PauliOperators{$T}" for T in [Float32, Float64, ComplexF32, ComplexF64]
+@testset "PauliOperators{$T}" for T in [Float32, Float64, BigFloat, ComplexF32, ComplexF64, Complex{BigFloat}]
+    RT = real(T)
     POT = PauliOperators{T}
     POCT = PauliOperators{complex(T)}
+    rtol = max(sqrt(eps()), sqrt(eps(RT)))
 
     op0 = POT()
     check_consistent(op0)
     @test sprint(show, op0) == "0.0"
     op0[Int32[]] = 1.2
     check_consistent(op0)
-    @test sprint(show, op0) == "1.2"
+    @test sprint(show, op0) == "$(RT(1.2))"
     op0[OPToken(1)] = 2.3
-    @test sprint(show, op0) == "2.3"
+    @test sprint(show, op0) == "$(RT(2.3))"
     op0["I"] = 3.4
-    @test sprint(show, op0) == "3.4"
+    @test sprint(show, op0) == "$(RT(3.4))"
     op0["i"] = 3.5
-    @test sprint(show, op0) == "3.5"
+    @test sprint(show, op0) == "$(RT(3.5))"
     @test_throws BoundsError op0[OPToken(0)]
     @test_throws BoundsError op0[[5, 9]]
     @test_throws ArgumentError op0["XY"]
@@ -106,19 +108,19 @@ end
 
     op0′ = -op0
     @test !(op0 ≈ op0′)
-    @test sprint(show, op0′) == "-3.5"
+    @test sprint(show, op0′) == "$(-RT(3.5))"
     op0′ = op0 * 1.2
-    @test sprint(show, op0′) == "$(3.5 * 1.2)"
+    @test sprint(show, op0′) == "$(RT(3.5) * 1.2)"
     op0′ = 0.1 * op0
-    @test sprint(show, op0′) == "$(0.1 * 3.5)"
+    @test sprint(show, op0′) == "$(0.1 * RT(3.5))"
 
-    @test sprint(show, op0 / 2) == "1.75"
-    @test sprint(show, 4 \ op0) == "0.875"
+    @test sprint(show, op0 / 2) == "$(RT(1.75))"
+    @test sprint(show, 4 \ op0) == "$(RT(0.875))"
 
     op1 = POT(Dict(" X1Y2 "=>1.2, " Z3Y1X₁₀"=>-0.2))
     check_consistent(op1)
-    @test sprint(show, op1) == "1.2 * X₁Y₂ - 0.2 * Y₁Z₃X₁₀"
-    @test sprint(show, -op1) == "-1.2 * X₁Y₂ + 0.2 * Y₁Z₃X₁₀"
+    @test sprint(show, op1) == "$(RT(1.2)) * X₁Y₂ - $(RT(0.2)) * Y₁Z₃X₁₀"
+    @test sprint(show, -op1) == "$(RT(-1.2)) * X₁Y₂ + $(RT(0.2)) * Y₁Z₃X₁₀"
     @test op1[[(:x, 1), ("Y", 2)]] == T(1.2)
     @test op1[[(:y, 2), ("x", 1)]] == T(1.2)
     @test op1[[(:X, 10), ("z", 3), (:y, 1)]] == T(-0.2)
@@ -131,7 +133,7 @@ end
                            Int32[4 + 1, 8 + 3]=>OPToken(2),
                            Int32[4 + 3, 12 + 2, 40 + 1]=>OPToken(3))
     check_consistent(op1′)
-    @test sprint(show, op1′) == "-0.3 + 1.2 * X₁Y₂ - 0.2 * Y₁Z₃X₁₀"
+    @test sprint(show, op1′) == "$(RT(-0.3)) + $(RT(1.2)) * X₁Y₂ - $(RT(0.2)) * Y₁Z₃X₁₀"
 
     @test_throws ArgumentError POT(Dict("Z3Y1X₁₀Z8 "=>-0.2))
     @test_throws ArgumentError POT(Dict("Z3Y1"=>-0.2, "Y₁Z₃"=>0.2))
@@ -145,23 +147,23 @@ end
 
     op2 = op0 + op1
     check_consistent(op2)
-    @test sprint(show, op2) == "3.5 + 1.2 * X₁Y₂ - 0.2 * Y₁Z₃X₁₀"
+    @test sprint(show, op2) == "$(RT(3.5)) + $(RT(1.2)) * X₁Y₂ - $(RT(0.2)) * Y₁Z₃X₁₀"
     op2 = op1 + op0
     check_consistent(op2)
-    @test sprint(show, op2) == "3.5 + 1.2 * X₁Y₂ - 0.2 * Y₁Z₃X₁₀"
+    @test sprint(show, op2) == "$(RT(3.5)) + $(RT(1.2)) * X₁Y₂ - $(RT(0.2)) * Y₁Z₃X₁₀"
 
     @test op1 + op0 == op0 + op1
     @test op1 - op0 == -(op0 - op1)
 
     op3 = mul!(POT(max_len=2), op2, -2)
     check_consistent(op3)
-    @test sprint(show, op3) == "-7.0 - 2.4 * X₁Y₂"
+    @test sprint(show, op3) == "$(RT(-7.0)) - $(RT(2.4)) * X₁Y₂"
     op4 = mul!(POT(max_len=2), 2, op2)
     check_consistent(op4)
-    @test sprint(show, op4) == "7.0 + 2.4 * X₁Y₂"
+    @test sprint(show, op4) == "$(RT(7.0)) + $(RT(2.4)) * X₁Y₂"
     op5 = div!(POT(max_len=4), op2, 2)
     check_consistent(op5)
-    @test sprint(show, op5) == "1.75 + 0.6 * X₁Y₂ - 0.1 * Y₁Z₃X₁₀"
+    @test sprint(show, op5) == "$(RT(1.75)) + $(RT(0.6)) * X₁Y₂ - $(RT(0.1)) * Y₁Z₃X₁₀"
 
     op6 = POT(Dict("i"=>-0.3, "X1Y2"=>1.2, "X2Z3"=>1, "Z3Y1X₁₀ "=>-0.2))
     op7 = POT(Dict("I"=>0.3, "X1Y3"=>1.3, "X2Z3"=>2, "Z3Y1X₉ "=>-0.1))
@@ -172,8 +174,8 @@ end
     check_consistent(op6_7_2)
     @test op6_7 == op7 + op6
     @test op6 - op7 == -(op7 - op6)
-    @test sprint(show, op6_7) == "1.2 * X₁Y₂ + 1.3 * X₁Y₃ - 0.1 * Y₁Z₃X₉ - 0.2 * Y₁Z₃X₁₀ + 3.0 * X₂Z₃"
-    @test sprint(show, op6_7_2) == "0.6 * X₁Y₂ + 0.65 * X₁Y₃ - 0.05 * Y₁Z₃X₉ - 0.1 * Y₁Z₃X₁₀ + 1.5 * X₂Z₃"
+    @test sprint(show, op6_7) == "$(RT(1.2)) * X₁Y₂ + $(RT(1.3)) * X₁Y₃ - $(RT(0.1)) * Y₁Z₃X₉ - $(RT(0.2)) * Y₁Z₃X₁₀ + $(RT(3.0)) * X₂Z₃"
+    @test sprint(show, op6_7_2) == "$(RT(0.6)) * X₁Y₂ + $(RT(0.65)) * X₁Y₃ - $(RT(0.05)) * Y₁Z₃X₉ - $(RT(0.1)) * Y₁Z₃X₁₀ + $(RT(1.5)) * X₂Z₃"
 
     op8 = POT(Dict("X4Y2"=>1.2, "X2Z3"=>1, "Z3Y1X₁₀ "=>-0.2))
     op9 = POT(Dict("X4Y3"=>1.3, "X2Z3"=>2, "Z3Y1X₉ "=>-0.1))
@@ -184,14 +186,14 @@ end
     check_consistent(op8_9_2)
     @test op8_9 == muladd(2, op8, op9)
     @test muladd(op8, -1, op9) == -muladd(op9, -1, op8)
-    @test sprint(show, op8_9) == "-0.1 * Y₁Z₃X₉ - 0.4 * Y₁Z₃X₁₀ + 4.0 * X₂Z₃ + 2.4 * Y₂X₄ + 1.3 * Y₃X₄"
-    @test sprint(show, op8_9_2) == "-0.05 * Y₁Z₃X₉ - 0.2 * Y₁Z₃X₁₀ + 2.0 * X₂Z₃ + 1.2 * Y₂X₄ + 0.65 * Y₃X₄"
+    @test sprint(show, op8_9) == "$(RT(-0.1)) * Y₁Z₃X₉ - $(RT(0.4)) * Y₁Z₃X₁₀ + $(RT(4.0)) * X₂Z₃ + $(RT(2.4)) * Y₂X₄ + $(RT(1.3)) * Y₃X₄"
+    @test sprint(show, op8_9_2) == "$(RT(-0.05)) * Y₁Z₃X₉ - $(RT(0.2)) * Y₁Z₃X₁₀ + $(RT(2.0)) * X₂Z₃ + $(RT(1.2)) * Y₂X₄ + $(RT(0.65)) * Y₃X₄"
 
     ic6_7 = Pauli.icomm!(POT(max_len=5), op6, op7)
     check_consistent(op6)
     check_consistent(op7)
     check_consistent(ic6_7)
-    @test ic6_7 ≈ POT(Dict("X₁X₂X₃"=>2.6, "X₁Z₂Z₃"=>4.8, "Z₁Y₂Z₃X₉"=>0.24), max_len=4)
+    @test ic6_7 ≈ POT(Dict("X₁X₂X₃"=>2.6, "X₁Z₂Z₃"=>4.8, "Z₁Y₂Z₃X₉"=>0.24), max_len=4) rtol=rtol
     @test ic6_7 ≈ -Pauli.icomm!(POT(max_len=5), op7, op6)
     @test ic6_7 ≈ im * (mul!(POCT(max_len=5), op6, op7) - mul!(POCT(max_len=5), op7, op6))
     check_consistent(op6)
@@ -208,16 +210,16 @@ end
 
     if T <: Complex
         cop1 = POT(Dict("i"=>-0.3im, "X1Y2"=>1.2 + 0.1im, "Z3Y1X₁₀ "=>-0.2 - 1im))
-        @test sprint(show, cop1) == "-0.3im + (1.2 + 0.1im) * X₁Y₂ - (0.2 + 1.0im) * Y₁Z₃X₁₀"
+        @test sprint(show, cop1) == "$(RT(-0.3))im + ($(RT(1.2)) + $(RT(0.1))im) * X₁Y₂ - ($(RT(0.2)) + $(RT(1.0))im) * Y₁Z₃X₁₀"
         cop2 = POT(Dict("i"=>-1 + 0.3im, "X1Y2"=>-1.2 + 0.1im, "Z3Y1X₁₀ "=>0.2 - 1im))
-        @test sprint(show, cop2) == "-1.0 + 0.3im - (1.2 - 0.1im) * X₁Y₂ + (0.2 - 1.0im) * Y₁Z₃X₁₀"
+        @test sprint(show, cop2) == "$(RT(-1.0)) + $(RT(0.3))im - ($(RT(1.2)) - $(RT(0.1))im) * X₁Y₂ + ($(RT(0.2)) - $(RT(1.0))im) * Y₁Z₃X₁₀"
 
         p6_7 = mul!(POT(max_len=5), op6, op7)
         @test p6_7 ≈ POT(Dict("I"=>1.91, "X₁X₂X₃"=>-1.3im, "X₁Z₂Z₃"=>-2.4im,
                                "X₁Y₂"=>0.36, "X₁Y₃"=>-0.39, "Z₁Y₂Z₃X₉"=>-0.12im,
                                "Z₁X₃X₁₀"=>0.26, "Y₁X₂X₉"=>-0.1, "Y₁X₂X₁₀"=>-0.4,
                                "Y₁Z₃X₉"=>0.03, "Y₁Z₃X₁₀"=>-0.06, "X₂Z₃"=>-0.3,
-                               "Y₂Y₃"=>1.56, "X₉X₁₀"=>0.02), max_len=4)
+                               "Y₂Y₃"=>1.56, "X₉X₁₀"=>0.02), max_len=4) rtol=rtol
         @test mul!(POT(max_len=5), op7, op6) ≈ p6_7 + im * ic6_7
 
         p6_7′ = op6 * op7
@@ -225,29 +227,29 @@ end
                                  "X₁Y₂"=>0.36, "X₁Y₃"=>-0.39,
                                  "Z₁X₃X₁₀"=>0.26, "Y₁X₂X₉"=>-0.1, "Y₁X₂X₁₀"=>-0.4,
                                  "Y₁Z₃X₉"=>0.03, "Y₁Z₃X₁₀"=>-0.06, "X₂Z₃"=>-0.3,
-                                 "Y₂Y₃"=>1.56, "X₉X₁₀"=>0.02), max_len=4)
+                                 "Y₂Y₃"=>1.56, "X₉X₁₀"=>0.02), max_len=4) rtol=rtol
         @test op7 * op6 ≈ muladd(ic6_7′, im, p6_7′)
 
         p8_9 = mul!(POT(max_len=6), op8, op9)
         @test p8_9 ≈ POT(Dict("I"=>2, "Y₁X₂X₉"=>-0.1, "Y₁X₂X₁₀"=>-0.4,
                                "Y₁Y₂Z₃X₄X₉"=>-0.12, "Y₁X₃X₄X₁₀"=>0.26im,
                                "X₂X₃X₄"=>-1.3im, "Z₂Z₃X₄"=>-2.4im, "Y₂Y₃"=>1.56,
-                               "X₉X₁₀"=>0.02), max_len=5)
+                               "X₉X₁₀"=>0.02), max_len=5) rtol=rtol
 
         p8_9′ = op8 * op9
         @test p8_9′ ≈ POT(Dict("I"=>2, "Y₁X₂X₉"=>-0.1, "Y₁X₂X₁₀"=>-0.4,
                                  "X₂X₃X₄"=>-1.3im, "Z₂Z₃X₄"=>-2.4im, "Y₂Y₃"=>1.56,
-                                 "X₉X₁₀"=>0.02), max_len=4)
+                                 "X₉X₁₀"=>0.02), max_len=4) rtol=rtol
 
         op8² = mul!(POT(max_len=6), op8, op8)
         @test op8² ≈ POT(Dict("I"=>2.48, "Y₁X₂X₁₀"=>-0.4,
-                                "Y₁Y₂Z₃X₄X₁₀"=>-0.48), max_len=5)
+                                "Y₁Y₂Z₃X₄X₁₀"=>-0.48), max_len=5) rtol=rtol
 
         op8²′ = op8 * op8
-        @test op8²′ ≈ POT(Dict("I"=>2.48, "Y₁X₂X₁₀"=>-0.4))
+        @test op8²′ ≈ POT(Dict("I"=>2.48, "Y₁X₂X₁₀"=>-0.4)) rtol=rtol
 
         op9² = mul!(POT(max_len=6), op9, op9)
-        @test op9² ≈ POT(Dict("I"=>5.7, "Y₁X₂X₉"=>-0.4), max_len=5)
+        @test op9² ≈ POT(Dict("I"=>5.7, "Y₁X₂X₉"=>-0.4), max_len=5) rtol=rtol
         @test op9² == op9 * op9
     end
 end
