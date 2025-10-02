@@ -12,6 +12,24 @@ using ..Utils: ThreadObjectPool
 
 public add!, sub!, mul!, div!, icomm, icomm!, Workspace, PauliOperators, OPToken
 
+struct PVector{T} <: AbstractVector{T}
+    ptr::Ptr{T}
+    len::Int
+    PVector(a::AbstractVector{T}) where T = new{T}(pointer(a), length(a))
+    PVector(a::AbstractVector{T}, rng::UnitRange) where T =
+        new{T}(pointer(a, first(rng)), length(rng))
+end
+
+@inline Base.size(a::PVector) = (a.len,)
+@inline Base.strides(::PVector) = (1,)
+@inline Base.unsafe_convert(::Type{Ptr{T}}, a::PVector) where T = Ptr{T}(a.ptr)
+@inline Base.elsize(::Type{PVector{T}}) where T = sizeof(T)
+@inline Base.getindex(a::PVector{T}, i) where T =
+    Base.pointerref(a.ptr, Int(i), Base.datatype_alignment(T))
+@inline Base.getindex(a::PVector, rng::UnitRange) = PVector(a, rng)
+@inline Base.setindex!(a::PVector{T}, v, i) where T =
+    Base.pointerset(a.ptr, T(v), Int(i), Base.datatype_alignment(T))
+
 mutable struct Workspace{T}
     const bitvec_cache::Vector{Vector{Int32}}
     bitvec_used::Int
@@ -220,6 +238,12 @@ Base.@propagate_inbounds Base.setindex!(op::PauliOperators, v, bits; workspace=n
     return @inbounds @view(op.term_bits[offset + 1:offset + nbits])
 end
 
+@inline function get_bits(term_bits::PVector, term::Term)
+    nbits = term.bits & 255
+    offset = term.bits >> 8
+    return term_bits[offset + 1:offset + nbits]
+end
+
 function _parse_bits!(res, bits)
     for b in bits
         if b isa Integer
@@ -302,21 +326,26 @@ function parse_bits!(bits, input)
     return bits
 end
 
-function _findterm(op::PauliOperators, bits::AbstractVector{Int32})
-    lb = 1
-    ub = length(op.terms)
-    while ub >= lb
-        mid = ub
-        c = cmp(bits, get_bits(op, @inbounds(op.terms[mid])))
-        if c == 0
-            return OPToken(mid)
-        elseif c > 0
-            lb = mid + 1
-        else
-            ub = mid - 1
+function _findterm(op::PauliOperators, bits::Vector{Int32})
+    GC.@preserve op bits begin
+        term_bits = PVector(op.term_bits)
+        terms = PVector(op.terms)
+        bits = PVector(bits)
+        lb = 1
+        ub = length(terms)
+        while ub >= lb
+            mid = ub
+            c = cmp(bits, get_bits(term_bits, terms[mid]))
+            if c == 0
+                return OPToken(mid)
+            elseif c > 0
+                lb = mid + 1
+            else
+                ub = mid - 1
+            end
         end
+        return OPToken(0)
     end
-    return OPToken(0)
 end
 
 function findterm(op::PauliOperators{T}, bits; workspace=nothing) where T
@@ -339,21 +368,27 @@ end
 @inline function _build_op!(out::PauliOperators{T}, workspace::Workspace, keep_zero=false,
                             recorder=nothing) where T
     empty!(out)
-    @inline sort!(workspace.terms, by=(@inline term->ptr_to_intvec(term[1])),
-                  alg=Sort.QuickSort)
-    for (ptr, v) in workspace.terms
-        bits = ptr_to_intvec(ptr)
-        nbits = length(bits)
-        if nbits == 0
-            _record_term(recorder, bits, 1)
-            @inbounds out.terms[1] = Term{T}(v, out.terms[1].bits)
-            continue
-        elseif !keep_zero && v == 0
-            _record_term(recorder, bits, 0)
-            continue
+    GC.@preserve workspace begin
+        ws_terms = workspace.terms
+        if isbitstype(T)
+            ws_terms = PVector(ws_terms)
         end
-        _add_term!(out, v, bits)
-        _record_term(recorder, bits, length(out.terms))
+        @inline sort!(ws_terms, by=(@inline term->ptr_to_intvec(term[1])),
+                      alg=Sort.QuickSort)
+        for (ptr, v) in ws_terms
+            bits = ptr_to_intvec(ptr)
+            nbits = length(bits)
+            if nbits == 0
+                _record_term(recorder, bits, 1)
+                @inbounds out.terms[1] = Term{T}(v, out.terms[1].bits)
+                continue
+            elseif !keep_zero && v == 0
+                _record_term(recorder, bits, 0)
+                continue
+            end
+            _add_term!(out, v, bits)
+            _record_term(recorder, bits, length(out.terms))
+        end
     end
     return out
 end
@@ -461,7 +496,7 @@ end
 
 @inline function Base.empty!(op::PauliOperators{T}) where T
     resize!(op.terms, 1)
-    @inbounds op.terms[1] = Term{T}(0, op.terms[1].bits)
+    @inbounds op.terms[1] = Term{T}(zero(T), op.terms[1].bits)
     empty!(op.term_bits)
     empty!(op.terms_map)
     empty!(op.terms_map_offsets)
@@ -469,36 +504,42 @@ end
 end
 
 function _populate_terms_map(op::PauliOperators)
-    offsets = op.terms_map_offsets
-    maxbit = 0
-    @inbounds for bit in op.term_bits
-        bitidx = bit >> 2
-        if bitidx > maxbit
-            resize!(offsets, bitidx + 1)
-            for i in maxbit + 1:bitidx - 1
-                offsets[i + 1] = Int32(0)
-            end
-            offsets[bitidx + 1] = Int32(1)
-            maxbit = bitidx
-        else
-            offsets[bitidx + 1] += Int32(1)
-        end
-    end
-    total_bits::Int32 = 0
-    @inbounds offsets[1] = 0
-    @inbounds for i in 1:maxbit
-        cnt = offsets[i + 1]
-        offsets[i + 1] = total_bits
-        total_bits += cnt
-    end
-    terms_map = op.terms_map
-    resize!(terms_map, length(op.term_bits))
-    @inbounds for (termidx, term) in enumerate(op.terms)
-        for bit in get_bits(op, term)
+    GC.@preserve op begin
+        terms = PVector(op.terms)
+        term_bits = PVector(op.term_bits)
+        resize!(op.terms_map, length(term_bits))
+        terms_map = PVector(op.terms_map)
+
+        _offsets = op.terms_map_offsets
+        maxbit = 0
+        @inbounds for bit in term_bits
             bitidx = bit >> 2
-            mapidx = offsets[bitidx + 1] + 1
-            offsets[bitidx + 1] = mapidx
-            terms_map[mapidx] = termidx
+            if bitidx > maxbit
+                resize!(_offsets, bitidx + 1)
+                for i in maxbit + 1:bitidx - 1
+                    _offsets[i + 1] = Int32(0)
+                end
+                _offsets[bitidx + 1] = Int32(1)
+                maxbit = bitidx
+            else
+                _offsets[bitidx + 1] += Int32(1)
+            end
+        end
+        offsets = PVector(_offsets)
+        total_bits::Int32 = 0
+        offsets[1] = 0
+        for i in 1:maxbit
+            cnt = offsets[i + 1]
+            offsets[i + 1] = total_bits
+            total_bits += cnt
+        end
+        for (termidx, term) in enumerate(terms)
+            for bit in get_bits(term_bits, term)
+                bitidx = bit >> 2
+                mapidx = offsets[bitidx + 1] + 1
+                offsets[bitidx + 1] = mapidx
+                terms_map[mapidx] = termidx
+            end
         end
     end
 end
@@ -536,13 +577,15 @@ end
 
 function mul!(out::PauliOperators{T}, op::PauliOperators, scale::Number) where T
     max_len = out.max_len
-    if max_len < op.max_len
+    op_terms = PVector(op.terms)
+    nterms = length(op_terms)
+    GC.@preserve out op if max_len < op.max_len
         empty!(out)
-        @inbounds out.terms[1] = Term{T}(op.terms[1].v * scale, out.terms[1].bits)
-        nterms = length(op.terms)
-        @inbounds for i in 2:length(op.terms)
-            term = op.terms[i]
-            bits = get_bits(op, term)
+        @inbounds out.terms[1] = Term{T}(op_terms[1].v * scale, out.terms[1].bits)
+        term_bits = PVector(op.term_bits)
+        @inbounds for i in 2:length(op_terms)
+            term = op_terms[i]
+            bits = get_bits(term_bits, term)
             if length(bits) <= max_len
                 _add_term!(out, term.v * scale, bits)
             end
@@ -551,10 +594,9 @@ function mul!(out::PauliOperators{T}, op::PauliOperators, scale::Number) where T
         _copy_vec!(out.terms_map_offsets, op.terms_map_offsets)
         _copy_vec!(out.terms_map, op.terms_map)
         _copy_vec!(out.term_bits, op.term_bits)
-        nterms = length(op.terms)
         resize!(out.terms, nterms)
         @inbounds @simd for i in 1:nterms
-            term = op.terms[i]
+            term = op_terms[i]
             out.terms[i] = Term{T}(term.v * scale, term.bits)
         end
     end
@@ -568,58 +610,65 @@ end
 end
 
 @inline function foreach_nzterms(cb, A::PauliOperators, B::PauliOperators)
-    ntermsa = length(A.terms)
-    ntermsb = length(B.terms)
-    idxa = 2
-    idxb = 2
-    @inbounds if idxa <= ntermsa && idxb <= ntermsb
-        terma = A.terms[idxa]
-        termb = B.terms[idxb]
-        while true
-            bitsa = get_bits(A, terma)
-            bitsb = get_bits(B, termb)
+    GC.@preserve A B begin
+        termsa = PVector(A.terms)
+        termsb = PVector(B.terms)
+        term_bitsa = PVector(A.term_bits)
+        term_bitsb = PVector(B.term_bits)
+        ntermsa = length(termsa)
+        ntermsb = length(termsb)
+        idxa = 2
+        idxb = 2
+        @inbounds if idxa <= ntermsa && idxb <= ntermsb
+            terma = termsa[idxa]
+            termb = termsb[idxb]
+            while true
+                bitsa = get_bits(term_bitsa, terma)
+                bitsb = get_bits(term_bitsb, termb)
 
-            c = cmp(bitsa, bitsb)
-            if c < 0
-                @inline cb(bitsa, terma.v, static(false))
-                idxa += 1
-                if idxa > ntermsa
-                    break
+                c = cmp(bitsa, bitsb)
+                if c < 0
+                    @inline cb(bitsa, terma.v, static(false))
+                    idxa += 1
+                    if idxa > ntermsa
+                        break
+                    end
+                    terma = termsa[idxa]
+                elseif c > 0
+                    @inline cb(bitsb, static(false), termb.v)
+                    idxb += 1
+                    if idxb > ntermsb
+                        break
+                    end
+                    termb = termsb[idxb]
+                else
+                    @inline cb(bitsa, terma.v, termb.v)
+                    idxa += 1
+                    idxb += 1
+                    if idxa > ntermsa || idxb > ntermsb
+                        break
+                    end
+                    terma = termsa[idxa]
+                    termb = termsb[idxb]
                 end
-                terma = A.terms[idxa]
-            elseif c > 0
-                @inline cb(bitsb, static(false), termb.v)
-                idxb += 1
-                if idxb > ntermsb
-                    break
-                end
-                termb = B.terms[idxb]
-            else
-                @inline cb(bitsa, terma.v, termb.v)
-                idxa += 1
-                idxb += 1
-                if idxa > ntermsa || idxb > ntermsb
-                    break
-                end
-                terma = A.terms[idxa]
-                termb = B.terms[idxb]
             end
         end
-    end
-    @inbounds for i in idxa:ntermsa
-        terma = A.terms[i]
-        @inline cb(get_bits(A, terma), terma.v, static(false))
-    end
-    @inbounds for i in idxb:ntermsb
-        termb = B.terms[i]
-        @inline cb(get_bits(B, termb), static(false), termb.v)
+        @inbounds for i in idxa:ntermsa
+            terma = termsa[i]
+            @inline cb(get_bits(term_bitsa, terma), terma.v, static(false))
+        end
+        @inbounds for i in idxb:ntermsb
+            termb = termsb[i]
+            @inline cb(get_bits(term_bitsb, termb), static(false), termb.v)
+        end
     end
 end
 
 function add!(out::PauliOperators{T}, A::PauliOperators, ca::Number,
               B::PauliOperators, cb::Number) where T
     empty!(out)
-    @inbounds out.terms[1] = Term{T}(A.terms[1].v * ca + B.terms[1].v * cb, out.terms[1].bits)
+    @inbounds out.terms[1] = Term{T}(A.terms[1].v * ca + B.terms[1].v * cb,
+                                     out.terms[1].bits)
     max_len = out.max_len
     foreach_nzterms(A::PauliOperators, B::PauliOperators) do bits, va, vb
         if length(bits) <= max_len
@@ -656,10 +705,15 @@ end
                       B::PauliOperators; workspace=nothing) where T
     with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
-        @inbounds for terma in A.terms
-            bitsa = get_bits(A, terma)
-            for termb in B.terms
-                bits, phase = mul_bits(workspace, bitsa, get_bits(B, termb), max_len)
+        termsa = PVector(A.terms)
+        termsb = PVector(B.terms)
+        term_bitsa = PVector(A.term_bits)
+        term_bitsb = PVector(B.term_bits)
+        GC.@preserve A B @inbounds for terma in termsa
+            bitsa = get_bits(term_bitsa, terma)
+            for termb in termsb
+                bits, phase = mul_bits(workspace, bitsa,
+                                       get_bits(term_bitsb, termb), max_len)
                 if bits === nothing
                     continue
                 end
@@ -696,12 +750,19 @@ end
     _ensure_terms_map(B)
     with_workspace(T, workspace, RST_BITVEC | RST_TERMS) do workspace
         max_len = out.max_len
-        visited = workspace.visited
-        map_offsetsb = B.terms_map_offsets
+        map_offsetsb = PVector(B.terms_map_offsets)
         maxbitb = length(map_offsetsb) - 1
-        resize!(visited, maxbitb)
-        @inbounds for terma in A.terms
-            bitsa = get_bits(A, terma)
+        resize!(workspace.visited, maxbitb)
+
+        visited = PVector(workspace.visited)
+        termsa = PVector(A.terms)
+        termsb = PVector(B.terms)
+        term_bitsa = PVector(A.term_bits)
+        term_bitsb = PVector(B.term_bits)
+        terms_mapb = PVector(B.terms_map)
+
+        GC.@preserve workspace A B @inbounds for terma in termsa
+            bitsa = get_bits(term_bitsa, terma)
             fill!(visited, false)
             for bita in bitsa
                 bitidxa = bita >> 2
@@ -710,8 +771,8 @@ end
                 end
                 visited[bitidxa] = true
                 for mapidx in map_offsetsb[bitidxa] + 1:map_offsetsb[bitidxa + 1]
-                    termb = B.terms[B.terms_map[mapidx]]
-                    bitsb = get_bits(B, termb)
+                    termb = termsb[terms_mapb[mapidx]]
+                    bitsb = get_bits(term_bitsb, termb)
                     if check_visited(visited, bitidxa, bitsb)
                         continue
                     end
