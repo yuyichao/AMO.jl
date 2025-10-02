@@ -1,0 +1,19 @@
+Add
+  78.348 ns (0 allocations: 0 bytes)
+  83.718 ns (0 allocations: 0 bytes)
+Mul (scalar)
+  16.239 ns (0 allocations: 0 bytes)
+  16.657 ns (0 allocations: 0 bytes)
+Mul
+  1.354 μs (0 allocations: 0 bytes)
+  1.383 μs (0 allocations: 0 bytes)
+Comm
+  783.033 ns (0 allocations: 0 bytes)
+  812.965 ns (0 allocations: 0 bytes)
+  815.452 ns (0 allocations: 0 bytes)
+  839.575 ns (0 allocations: 0 bytes)
+Add + Comm
+  1.675 μs (0 allocations: 0 bytes)
+  1.737 μs (0 allocations: 0 bytes)
+  1.746 μs (0 allocations: 0 bytes)
+  1.754 μs (0 allocations: 0 bytes)
