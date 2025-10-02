@@ -188,13 +188,14 @@ mutable struct PauliOperators{T}
     const term_bits::Vector{Int32}
     # Lazily populated arrays to identify which term contains the corresponding qubit
     const terms_map::Memory{Vector{Int32}}
-    const max_len::Int
+    nbits::UInt32
+    max_len::UInt8
     function PauliOperators{T}(nbits; max_len=3) where T
         terms_map = Memory{Vector{Int32}}(undef, nbits)
         @inbounds for i in 1:nbits
             terms_map[i] = Int32[]
         end
-        return new{T}([Term{T}(0, 0)], Int32[], terms_map, max_len)
+        return new{T}([Term{T}(0, 0)], Int32[], terms_map, nbits, max_len)
     end
 end
 
@@ -330,7 +331,7 @@ function findterm(op::PauliOperators{T}, bits; workspace=nothing) where T
     end
     return with_workspace(T, workspace, RST_BITVEC) do workspace
         return _findterm(op, parse_bits!(alloc_intvec(workspace),
-                                         bits, length(op.terms_map)))
+                                         bits, op.nbits))
     end
 end
 
@@ -382,12 +383,12 @@ function PauliOperators{T}(nbits, terms; max_len=3, workspace=nothing,
 end
 
 _empty(op::PauliOperators{T1}, ::Type{T2}) where {T1,T2} =
-    PauliOperators{promote_type(T1, T2)}(length(op.terms_map), max_len=op.max_len)
+    PauliOperators{promote_type(T1, T2)}(Int(op.nbits), max_len=op.max_len)
 _empty(op1::PauliOperators{T1}, op2::PauliOperators{T2}) where {T1,T2} =
-    PauliOperators{promote_type(T1, T2)}(length(op1.terms_map),
+    PauliOperators{promote_type(T1, T2)}(Int(max(op1.nbits, op2.nbits)),
                                          max_len=max(op1.max_len, op2.max_len))
 _empty(op1::PauliOperators{T1}, op2::PauliOperators{T2}, ::Type{T3}) where {T1,T2,T3} =
-    PauliOperators{promote_type(T1, T2, T3)}(length(op1.terms_map),
+    PauliOperators{promote_type(T1, T2, T3)}(Int(max(op1.nbits, op2.nbits)),
                                              max_len=max(op1.max_len, op2.max_len))
 
 Base.:(==)(op1::PauliOperators, op2::PauliOperators) =
@@ -522,14 +523,14 @@ end
 @noinline throw_bit_error() = throw(ArgumentError("Destination bit count too small"))
 
 @inline function check_nbits(tgt::PauliOperators, src::PauliOperators)
-    nbits = length(tgt.terms_map)
-    if length(src.terms_map) > nbits
+    nbits = tgt.nbits
+    if src.nbits > nbits
         throw_bit_error()
     end
     return nbits
 end
 @inline function check_nbits(nbits::Integer, src::PauliOperators)
-    if length(src.terms_map) > nbits
+    if src.nbits > nbits
         throw_bit_error()
     end
     return nbits
