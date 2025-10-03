@@ -598,8 +598,6 @@ end
     return tgt
 end
 
-@noinline throw_bit_error() = throw(ArgumentError("Destination bit count too small"))
-
 function mul!(out::PauliOperators{T}, op::PauliOperators, scale::Number) where T
     max_len = out.max_len
     op_terms = PVector(op.terms)

@@ -262,6 +262,9 @@ end
         @test im * Pauli.ibch(op1, op2, max_order=4) ≈ s4 rtol=rtol atol=rtol
     end
 
+    @test Pauli.ibch(op6, op6, max_order=4) ≈ op6 * 2 rtol=rtol atol=rtol
+    @test_throws ArgumentError Pauli.ibch(op6, op6, max_order=5)
+
     test_bch(op6, op7)
     test_bch(op7, op6)
     test_bch(op8, op9)
