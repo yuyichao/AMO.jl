@@ -70,6 +70,7 @@ let
            terms_recorder=Dict{Vector{Int},Pauli.OPToken}())
         PO(max_len=1)
         empty!(PO())
+        precompile(complex, (PO,))
         precompile(isvalid, (PO, Pauli.OPToken))
         precompile(getindex, (PO, Pauli.OPToken))
         precompile(setindex!, (PO, T, Pauli.OPToken))
@@ -102,5 +103,9 @@ let
         Pauli.icomm(op, op, workspace=ws)
         Pauli.icomm!(PO(), op, op)
         Pauli.icomm!(PO(), op, op, workspace=ws)
+        Pauli.ibch(op, op)
+        Pauli.ibch(op, op, max_order=1)
+        Pauli.ibch(op, op, workspace=ws)
+        Pauli.ibch(op, op, workspace=ws, max_order=1)
     end
 end

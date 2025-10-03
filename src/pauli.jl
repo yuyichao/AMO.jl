@@ -30,15 +30,42 @@ end
 @inline Base.setindex!(a::PVector{T}, v, i) where T =
     Base.pointerset(a.ptr, T(v), Int(i), Base.datatype_alignment(T))
 
+struct Term{T}
+    # coefficient
+    v::T
+    # an range in the `term_bits` array representing the pauli string for this term
+    bits::Int # nbits:8 + offset:24/56
+end
+
+Base.:(==)(t1::Term, t2::Term) = t1.v == t2.v && t1.bits == t2.bits
+Base.hash(t::Term, h::UInt) = hash(t.v, hash(t.bits, hash(:Term, h)))
+
+mutable struct PauliOperators{T}
+    const terms::Vector{Term{T}}
+    # Array storing the bit pattern for each term
+    # The last two bits of each number represents which pauli matrix (1: X, 2: Y, 3: Z)
+    # is present for the term, the upper bits of the number represent the bit index.
+    const term_bits::Vector{Int32}
+    # Lazily populated arrays to identify which term contains the corresponding qubit
+    const terms_map_offsets::Vector{Int32}
+    const terms_map::Vector{Int32}
+    max_len::UInt8
+    function PauliOperators{T}(; max_len=3) where T
+        return new{T}([Term{T}(0, 0)], Int32[], Int32[], Int32[], max_len)
+    end
+end
+
 mutable struct Workspace{T}
     const bitvec_cache::Vector{Vector{Int32}}
     bitvec_used::Int
     const termidx_map::Dict{Vector{Int32},Int32}
     const terms::Vector{Tuple{Ptr{Nothing},T}}
     const visited::Vector{Bool}
+    const op_cache::Vector{PauliOperators{T}}
+    op_used::Int
     function Workspace{T}() where T
         return new{T}(Vector{Int32}[], 0, Dict{Vector{Int32},Int32}(),
-                      Tuple{Ptr{Nothing},T}[], Bool[])
+                      Tuple{Ptr{Nothing},T}[], Bool[], PauliOperators{T}[], 0)
     end
 end
 
@@ -50,6 +77,8 @@ end
 
 const RST_BITVEC = static(1)
 const RST_TERMS = static(2)
+const RST_OP = static(4)
+const RST_ALL = RST_BITVEC | RST_TERMS | RST_OP
 
 @inline function with_workspace(@specialize(cb), ::Type{T}, workspace, rst_flag) where T
     if workspace !== nothing
@@ -62,7 +91,7 @@ const RST_TERMS = static(2)
     try
         return @inline cb(workspace)
     finally
-        reset!(workspace, rst_flag)
+        reset!(workspace, RST_ALL)
         put!(pool, workspace)
     end
 end
@@ -90,6 +119,9 @@ end
         empty!(workspace.terms)
         empty!(workspace.termidx_map)
     end
+    if (rst_flag & RST_OP) != 0
+        workspace.op_used = 0
+    end
     return
 end
 
@@ -113,6 +145,24 @@ end
         return res
     end
     return _alloc_intvec(workspace)
+end
+
+@noinline function _alloc_op(workspace::Workspace{T}, max_len::UInt8) where T
+    res = PauliOperators{T}(max_len=max_len)
+    push!(workspace.op_cache, res)
+    return res
+end
+
+@inline function alloc_op(workspace::Workspace, max_len::UInt8)
+    idx = workspace.op_used + 1
+    workspace.op_used = idx
+    if idx <= length(workspace.op_cache)
+        res = load_ptrarray(workspace.op_cache, idx)
+        empty!(res)
+        res.max_len = max_len
+        return res
+    end
+    return _alloc_op(workspace, max_len)
 end
 
 @inline function mul_bits(workspace::Workspace, bits1, bits2, max_len,
@@ -187,31 +237,6 @@ end
 @eval primitive type OPToken 32 end
 OPToken(v::Int) = reinterpret(OPToken, v % Int32)
 Base.Int(v::OPToken) = reinterpret(Int32, v) % Int
-
-struct Term{T}
-    # coefficient
-    v::T
-    # an range in the `term_bits` array representing the pauli string for this term
-    bits::Int # nbits:8 + offset:24/56
-end
-
-Base.:(==)(t1::Term, t2::Term) = t1.v == t2.v && t1.bits == t2.bits
-Base.hash(t::Term, h::UInt) = hash(t.v, hash(t.bits, hash(:Term, h)))
-
-mutable struct PauliOperators{T}
-    const terms::Vector{Term{T}}
-    # Array storing the bit pattern for each term
-    # The last two bits of each number represents which pauli matrix (1: X, 2: Y, 3: Z)
-    # is present for the term, the upper bits of the number represent the bit index.
-    const term_bits::Vector{Int32}
-    # Lazily populated arrays to identify which term contains the corresponding qubit
-    const terms_map_offsets::Vector{Int32}
-    const terms_map::Vector{Int32}
-    max_len::UInt8
-    function PauliOperators{T}(; max_len=3) where T
-        return new{T}([Term{T}(0, 0)], Int32[], Int32[], Int32[], max_len)
-    end
-end
 
 Base.isvalid(op::PauliOperators, idx::OPToken) = checkbounds(Bool, op.terms, Int(idx))
 
@@ -794,6 +819,66 @@ function icomm!(out::PauliOperators{T}, A::PauliOperators,
     end
 end
 
+# log(exp(iA)exp(iB))/i
+function ibch!(out::PauliOperators{T}, A::PauliOperators, B::PauliOperators;
+               workspace=nothing, max_order=3) where T
+    if max_order > 4
+        throw(ArgumentError("max order for bch is 4"))
+    end
+    # 1st order:
+    #   A + B
+    # 2nd order:
+    #   1/2 * i[A, B]
+    # 3rd order:
+    #   1/12 * (i[i[A, B], B] - i[i[A, B], A])
+    # 4th order:
+    #   1/24 * i[i[i[A, B], A], B]
+    with_workspace(T, workspace, RST_OP) do workspace
+        # live: A, B
+        # dead: out
+        if max_order <= 1
+            return add!(out, A, B)
+        end
+        max_len = max(A.max_len, B.max_len)
+        rmax_len = min(out.max_len, max_len)
+        s1 = add!(alloc_op(workspace, rmax_len), A, B)
+        # live: A, B, s1(rmax_len)
+        # dead: out
+        AB = icomm!(alloc_op(workspace, max_len), A, B, workspace=workspace)
+        # live: A, B, s1(rmax_len), AB(max_len)
+        # dead: out
+        if max_order == 2
+            return add!(out, s1, static(true), AB, T(0.5))
+        end
+        s2 = add!(alloc_op(workspace, rmax_len), s1, static(true), AB, T(0.5))
+        # live: A, B, AB(max_len), s2(rmax_len)
+        # dead: out, s1(rmax_len)
+        ABB = icomm!(s1, AB, B, workspace=workspace)
+        # live: A, B, AB(max_len), s2(rmax_len), ABB(rmax_len)
+        # dead: out
+        ABA = icomm!(alloc_op(workspace, max_order > 3 ? max_len : rmax_len),
+                     AB, A, workspace=workspace)
+        # live: A, B, s2(rmax_len), ABB(rmax_len), ABA(max_len*)
+        # dead: out, AB(max_len)
+        AB.max_len = rmax_len
+        ABB_ABA = sub!(AB, ABB, ABA)
+        if max_order == 3
+            # live: A, B, s2(rmax_len), ABA(rmax_len), ABB_ABA(rmax_len)
+            # dead: out, ABB(rmax_len)
+            return add!(out, s2, static(true), ABB_ABA, 1 / T(12))
+        end
+        # live: A, B, s2(rmax_len), ABA(max_len*), ABB_ABA(rmax_len)
+        # dead: out, ABB(rmax_len)
+        s3 = add!(ABB, s2, static(true), ABB_ABA, 1 / T(12))
+        # live: A, B, ABA(max_len), s3(rmax_len)
+        # dead: out, s2(rmax_len), ABB_ABA(rmax_len)
+        ABAB = icomm!(s2, ABA, B, workspace=workspace)
+        # live: A, B, s3(rmax_len), ABAB(rmax_len)
+        # dead: out, ABB_ABA(rmax_len), ABA(max_len)
+        return add!(out, s3, static(true), ABAB, -1 / T(24))
+    end
+end
+
 Base.:(+)(A::PauliOperators) = A
 Base.:(-)(A::PauliOperators) = static(-1) * A
 Base.:(+)(A::PauliOperators, B::PauliOperators) = add!(_empty(A, B), A, B)
@@ -811,6 +896,9 @@ Base.:(\)(c::Number, A::PauliOperators) = mul!(_empty(A, typeof(c)), A, 1 / c)
 Base.:(*)(A::PauliOperators, B::PauliOperators) = mul!(_empty(A, B), A, B)
 icomm(A::PauliOperators, B::PauliOperators; workspace=nothing) =
     icomm!(_empty(A, B), A, B; workspace=workspace)
+ibch(A::PauliOperators, B::PauliOperators; workspace=nothing, max_order=3) =
+    ibch!(_empty(A, B), A, B; workspace=workspace, max_order=max_order)
+Base.complex(A::PauliOperators) = A * static(complex(true))
 
 function Base.isapprox(A::PauliOperators, B::PauliOperators; kws...)
     @inbounds if !isapprox(A.terms[1].v, B.terms[1].v; kws...)

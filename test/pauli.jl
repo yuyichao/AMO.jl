@@ -141,6 +141,7 @@ end
     @test op1 === +op1
     @test op0 != op1
     @test op0 == op0
+    @test op1 == complex(op1)
     @test op1 == op1
     @test hash(op0) == hash(op0)
     @test hash(op1) == hash(op1)
@@ -207,6 +208,64 @@ end
 
     @test Pauli.icomm(op6, op6) == POT()
     @test Pauli.icomm(op7, op7) == POT()
+
+    function expxy(x, y, order)
+        if order >= 3
+            return Dict("X1"=>x - x * y^2 / 3,
+                        "Y1"=>y - y * x^2 / 3,
+                        "Z1"=>-x * y)
+        elseif order >= 2
+            return Dict("X1"=>x, "Y1"=>y,
+                        "Z1"=>-x * y)
+        else
+            return Dict("X1"=>x, "Y1"=>y)
+        end
+    end
+
+    function test_expxy(x, y)
+        @test Pauli.ibch(POT(("X1"=>x,)), POT(("Y1"=>y,))) ≈ POT(expxy(x, y, 3)) rtol=rtol
+        for order in 1:4
+            @test Pauli.ibch(POT(("X1"=>x,)), POT(("Y1"=>y,)), max_order=order) ≈ POT(expxy(x, y, order)) rtol=rtol
+        end
+    end
+
+    test_expxy(0.1, 0)
+    test_expxy(0, 0.1)
+    test_expxy(0.1, 0.1)
+    test_expxy(0.1, 0.2)
+    test_expxy(0.2, 0.1)
+    test_expxy(0.2, 0.2)
+
+    function test_bch(op1, op2)
+        X = im * op1
+        Y = im * op2
+        s1 = X + Y
+        @test im * Pauli.ibch(op1, op2, max_order=1) ≈ s1
+        s2 = s1 + Pauli.icomm(X, Y) / 2im
+        @test im * Pauli.ibch(op1, op2, max_order=2) ≈ s2 rtol=rtol
+        s3 = s2 + (Pauli.icomm(X, Pauli.icomm(X, Y) / im) / im + Pauli.icomm(Y, Pauli.icomm(Y, X) / im) / im) / 12
+        @test im * Pauli.ibch(op1, op2, max_order=3) ≈ s3 rtol=rtol
+        s4 = s3 - Pauli.icomm(Y, Pauli.icomm(X, Pauli.icomm(X, Y) / im) / im) / 24im
+        @test im * Pauli.ibch(op1, op2, max_order=4) ≈ s4 rtol=rtol
+
+        op1 = mul!(POT(max_len=20), op1, 1)
+        op2 = mul!(POT(max_len=20), op2, 1)
+        X = im * op1
+        Y = im * op2
+        s1 = X + Y
+        @test im * Pauli.ibch(op1, op2, max_order=1) ≈ s1
+        s2 = s1 + (X * Y - Y * X) / 2
+        @test im * Pauli.ibch(op1, op2, max_order=2) ≈ s2 rtol=rtol
+        s3 = s2 + (X * X * Y + X * Y * Y - 2 * X * Y * X + Y * Y * X + Y * X * X - 2 * Y * X * Y) / 12
+        @test im * Pauli.ibch(op1, op2, max_order=3) ≈ s3 rtol=rtol atol=rtol
+        s4 = s3 + (X * X * Y * Y - 2 * X * Y * X * Y - Y * Y * X * X + 2 * Y * X * Y * X) / 24
+        @test im * Pauli.ibch(op1, op2, max_order=4) ≈ s4 rtol=rtol atol=rtol
+    end
+
+    test_bch(op6, op7)
+    test_bch(op7, op6)
+    test_bch(op8, op9)
+    test_bch(op9, op8)
 
     if T <: Complex
         cop1 = POT(Dict("i"=>-0.3im, "X1Y2"=>1.2 + 0.1im, "Z3Y1X₁₀ "=>-0.2 - 1im))
