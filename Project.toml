@@ -24,7 +24,8 @@ julia = "1.11"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 HalfIntegers = "f0d1745a-41c9-11e9-1dd9-e5d34d218721"
 
 [targets]
-test = ["Test", "HalfIntegers"]
+test = ["Test", "Distributed", "HalfIntegers"]

@@ -1,7 +1,5 @@
 #
 
-module TestPauli
-
 using Test
 
 using AMO.Pauli: Pauli, PauliOperators, Workspace, OPToken, add!, sub!, mul!, div!
@@ -314,6 +312,4 @@ end
         @test op9² ≈ POT(Dict("I"=>5.7, "Y₁X₂X₉"=>-0.4), max_len=5) rtol=rtol
         @test op9² == op9 * op9
     end
-end
-
 end

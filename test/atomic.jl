@@ -1,7 +1,5 @@
 #
 
-module TestAtomic
-
 using AMO: g_sum, g_s, g_l, Atomic
 
 using Test
@@ -90,7 +88,5 @@ function check_coupling(jmax, kmax)
 end
 
 @testset "Reduced matrix element" begin
-    @time check_coupling(4, 2)
-end
-
+    check_coupling(4, 2)
 end

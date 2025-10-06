@@ -1,7 +1,5 @@
 #
 
-module TestTrap
-
 using Test
 using Base.Iterators
 
@@ -189,6 +187,4 @@ end
             end
         end
     end
-end
-
 end

@@ -1,7 +1,5 @@
 #
 
-module TestMath
-
 using Test
 
 import AMO.Math as M
@@ -41,6 +39,4 @@ end
         test_assoc_laguerre(0.0, -v, 10000)
         test_assoc_laguerre(-v, -v, 10000)
     end
-end
-
 end

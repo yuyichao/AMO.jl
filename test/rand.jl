@@ -1,7 +1,5 @@
 #
 
-module TestRand
-
 using AMO: RandSetBits, rand_setbits, RandDepol, Rand2QDepol
 
 using Test
@@ -119,6 +117,4 @@ end
 @testset "Rand2QDepol [$T]" for T in (Bool, Int8, UInt8, Int16, UInt16, Int32, UInt32,
                                       Int64, UInt64, Int128, UInt128)
     test_rand_2qdepol(T)
-end
-
 end

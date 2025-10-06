@@ -1,7 +1,5 @@
 #
 
-module TestTimeSequence
-
 import AMO.TimeSequence as TS
 
 using Test
@@ -357,6 +355,4 @@ end
     s3 = TS.Sequence{String}((SStep3(),))
     @test TS.nparams(s3) == 3
     test_string_sequence(s3)
-end
-
 end

@@ -1,9 +1,22 @@
 #!/usr/bin/julia
 
-include("utils.jl")
-include("math.jl")
-include("rand.jl")
-include("atomic.jl")
-include("time_sequence.jl")
-include("trap.jl")
-include("pauli.jl")
+using Distributed
+
+addprocs(Sys.CPU_THREADS)
+
+pmap(["pauli",
+      "atomic",
+      "trap",
+      "rand",
+      "time_sequence",
+      "math",
+      "utils",
+      ]) do file
+          println("Start testing $file")
+          @eval module $(Symbol("Test_$(file)_mod"))
+          include($(joinpath(@__DIR__, "$(file).jl")))
+          end
+          println("Done testing $file")
+          # So that we do not try to bring the worker-only module back to the main process
+          return
+      end

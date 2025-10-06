@@ -1,7 +1,5 @@
 #
 
-module TestUtils
-
 using AMO.Utils: ThreadObjectPool, ObjectPool, eachobj
 
 using Test
@@ -36,6 +34,4 @@ Base.setindex!(c::Counter, v) = (c.v = v)
         empty!(p)
         @test sum((v[] for v in eachobj(p)), init=0) == 0
     end
-end
-
 end
