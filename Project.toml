@@ -6,20 +6,25 @@ authors = ["Yichao Yu <yyc1992@gmail.com>"]
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+RationalRoots = "308eb6b3-cc68-5ff3-9e97-c3c4da4fa681"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 Static = "aedffcd0-7271-4cad-89d0-dc628f76c6d3"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+WignerSymbols = "9f57e263-0b3d-5e2e-b1be-24f2bb48858b"
 
 [compat]
 LinearAlgebra = "1.11.0"
 Random = "1.11.0"
+RationalRoots = "0.2.1"
 SpecialFunctions = "2.0"
 Static = "1.0"
 StaticArrays = "1.0"
+WignerSymbols = "2.0.0"
 julia = "1.11"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+HalfIntegers = "f0d1745a-41c9-11e9-1dd9-e5d34d218721"
 
 [targets]
-test = ["Test"]
+test = ["Test", "HalfIntegers"]
