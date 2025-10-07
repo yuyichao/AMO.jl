@@ -704,10 +704,10 @@ function add!(out::PauliOperators{T}, A::PauliOperators, ca::Number,
     return out
 end
 @inline function add!(out::PauliOperators, A::PauliOperators, B::PauliOperators)
-    return add!(out, A, static(1), B, static(1))
+    return add!(out, A, static(true), B, static(true))
 end
 @inline function sub!(out::PauliOperators, A::PauliOperators, B::PauliOperators)
-    return add!(out, A, static(1), B, static(-1))
+    return add!(out, A, static(true), B, static(-1))
 end
 
 function apply_phase(v, phase)
@@ -882,10 +882,10 @@ Base.:(-)(A::PauliOperators) = static(-1) * A
 Base.:(+)(A::PauliOperators, B::PauliOperators) = add!(_empty(A, B), A, B)
 Base.:(-)(A::PauliOperators, B::PauliOperators) = sub!(_empty(A, B), A, B)
 function Base.muladd(A::PauliOperators, c::Number, B::PauliOperators)
-    return add!(_empty(A, B, typeof(c)), A, c, B, static(1))
+    return add!(_empty(A, B, typeof(c)), A, c, B, static(true))
 end
 function Base.muladd(c::Number, A::PauliOperators, B::PauliOperators)
-    return add!(_empty(A, B, typeof(c)), A, c, B, static(1))
+    return add!(_empty(A, B, typeof(c)), A, c, B, static(true))
 end
 Base.:(*)(A::PauliOperators, c::Number) = mul!(_empty(A, typeof(c)), A, c)
 Base.:(*)(c::Number, A::PauliOperators) = mul!(_empty(A, typeof(c)), A, c)
@@ -896,7 +896,8 @@ icomm(A::PauliOperators, B::PauliOperators; workspace=nothing) =
     icomm!(_empty(A, B), A, B; workspace=workspace)
 ibch(A::PauliOperators, B::PauliOperators; workspace=nothing, max_order=3) =
     ibch!(_empty(A, B), A, B; workspace=workspace, max_order=max_order)
-Base.complex(A::PauliOperators) = A * static(complex(true))
+Base.copy!(A::PauliOperators, B::PauliOperators) = mul!(A, B, static(true))
+Base.complex(A::PauliOperators) = copy!(_empty(A, Complex{Bool}), A)
 
 function Base.isapprox(A::PauliOperators, B::PauliOperators; kws...)
     @inbounds if !isapprox(A.terms[1].v, B.terms[1].v; kws...)
