@@ -26,4 +26,28 @@ end
 couple_reduced_element(J1′, J2′, J0, J1, J2, k=1) =
     couple_reduced_element(RationalRoot{BigInt}, J1′, J2′, J0, J1, J2, k)
 
+function hyperfine(F; I, J, A, B, C=0)
+    T = float(promote_type(typeof(F), typeof(I), typeof(J),
+                           typeof(A), typeof(B), typeof(C)))
+
+    @fastmath begin
+        F2 = F * (F + 1)
+        I2 = I * (I + 1)
+        J2 = J * (J + 1)
+        K = F2 - (I2 + J2)
+        res::T = A * K / T(2)
+        if I > 0.5 && J > 0.5
+            IJ2 = I2 * J2
+            D2 = I * (2 * I - 1) * J * (2 * J - 1)
+            Q = 0.375 * K * (K + 1) - 0.5 * IJ2
+            res += B * Q / D2
+            if I > 1 && J > 1
+                O = 5 * K^2 * (K * 0.25 + 1) + K * (I2 + J2 + 3 - 3 * IJ2) - 5 * IJ2
+                res += C * O / (D2 * (I - 1) * (J - 1))
+            end
+        end
+    end
+    return res
+end
+
 end
