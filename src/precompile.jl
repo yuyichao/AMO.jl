@@ -108,4 +108,19 @@ let
         Pauli.ibch(op, op, workspace=ws)
         Pauli.ibch(op, op, workspace=ws, max_order=1)
     end
+
+    for F in Any[0.5, 1]
+        for J in Any[0.5, 1]
+            for I in Any[0.5, 1]
+                for A in Any[0, 0.5]
+                    for B in Any[0, 0.5]
+                        Atomic.hyperfine(F; I=I, J=I, A=A, B=B)
+                        for C in Any[0, 0.5]
+                            Atomic.hyperfine(F; I=I, J=I, A=A, B=B, C=C)
+                        end
+                    end
+                end
+            end
+        end
+    end
 end

@@ -90,3 +90,25 @@ end
 @testset "Reduced matrix element" begin
     check_coupling(4, 2)
 end
+
+@testset "Hyperfine" begin
+    # Sodium numbers
+
+    # S1/2
+    AS1 = 885.81306440
+    @test Atomic.hyperfine(2, I=3/2, J=1/2, A=AS1, B=0) ≈ 664.35979830 atol=5e-7
+    @test Atomic.hyperfine(1, I=3/2, J=1/2, A=AS1, B=0) ≈ -1107.26633050 atol=5e-7
+
+    # P1/2
+    AP1 = 94.44
+    @test Atomic.hyperfine(2, I=3/2, J=1/2, A=AP1, B=0) ≈ 70.830 atol=0.01
+    @test Atomic.hyperfine(1, I=3/2, J=1/2, A=AP1, B=0) ≈ -118.05 atol=0.01
+
+    # P3/2
+    AP3 = 18.534
+    BP3 = 2.724
+    @test Atomic.hyperfine(3, I=3/2, J=3/2, A=AP3, B=BP3) ≈ 42.382 atol=0.01
+    @test Atomic.hyperfine(2, I=3/2, J=3/2, A=AP3, B=BP3) ≈ -15.944 atol=0.01
+    @test Atomic.hyperfine(1, I=3/2, J=3/2, A=AP3, B=BP3) ≈ -50.288 atol=0.01
+    @test Atomic.hyperfine(0, I=3/2, J=3/2, A=AP3, B=BP3) ≈ -66.097 atol=0.01
+end
