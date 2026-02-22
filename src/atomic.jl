@@ -60,6 +60,13 @@ end
 couple_reduced_element(J1′, J2′, J0, J1, J2, k=1) =
     couple_reduced_element(RationalRoot{BigInt}, J1′, J2′, J0, J1, J2, k)
 
+"""
+    hyperfine(F; I, J, A, B, C=0)
+
+Compute hyperfine state energy for angular momentum `F`
+coupled from electron angular momentum `J` and nuclear angular momentum `I`
+with hyperfine structure constant `A`, `B` and `C`.
+"""
 function hyperfine(F; I, J, A, B, C=0)
     T = float(promote_type(typeof(F), typeof(I), typeof(J),
                            typeof(A), typeof(B), typeof(C)))
