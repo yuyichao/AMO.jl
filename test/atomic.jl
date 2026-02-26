@@ -112,3 +112,30 @@ end
     @test Atomic.hyperfine(1, I=3/2, J=3/2, A=AP3, B=BP3) ≈ -50.288 atol=0.01
     @test Atomic.hyperfine(0, I=3/2, J=3/2, A=AP3, B=BP3) ≈ -66.097 atol=0.01
 end
+
+@testset "SpinManifold" begin
+    it = Atomic.SpinManifoldIter(1, 2, 1.5)
+    @test length(it) == 11
+    @test collect(it) == [(1, 1, 1/2)
+                          (1, 1, 3/2)
+                          (1, 1, 5/2)
+                          (1, 2, 1/2)
+                          (1, 2, 3/2)
+                          (1, 2, 5/2)
+                          (1, 2, 7/2)
+                          (1, 3, 3/2)
+                          (1, 3, 5/2)
+                          (1, 3, 7/2)
+                          (1, 3, 9/2)]
+    @test string(it) == "Atomic.SpinManifoldIter(1, 2, 3/2)"
+
+    it = Atomic.SpinManifoldIter(10)
+    @test length(it) == 1
+    @test collect(it) == [(10,)]
+    @test string(it) == "Atomic.SpinManifoldIter(10)"
+
+    it = Atomic.SpinManifoldIter()
+    @test length(it) == 0
+    @test collect(it) == []
+    @test string(it) == "Atomic.SpinManifoldIter()"
+end

@@ -2,6 +2,7 @@
 
 module Atomic
 
+using HalfIntegers
 using RationalRoots
 using WignerSymbols
 
@@ -90,5 +91,73 @@ function hyperfine(F; I, J, A, B, C=0)
     end
     return res
 end
+
+_double(j)::Int = twice(j)
+
+struct SpinManifoldIter{N}
+    dJs::NTuple{N,Int}
+    global _double_spin_iter(dJs::NTuple{N,Int}) where N = new{N}(dJs)
+end
+
+SpinManifoldIter(Js...) = _double_spin_iter(_double.(Js))
+
+_start((dJ0,)::Tuple{Int}) = (dJ0,)
+_start((dJ0, dJ1, dJs...),) = (dJ0, _start((abs(dJ1 - dJ0), dJs...))...)
+
+_next((dJ0,)::Tuple{Int}, (state,)::Tuple{Int}) = false, state
+function _next((dJ0, dJ1, dJs...), (st0, st1, states...))
+    valid, next_states = _next((st1, dJs...), (st1, states...))
+    if valid
+        return true, (st0, next_states...)
+    elseif st1 >= dJ0 + dJ1
+        return false, (st0, next_states...)
+    end
+    return true, (dJ0, _start((st1 + 2, dJs...))...)
+end
+
+_length(::Tuple{Int}) = 1
+_length((dJ0, dJ1)::Tuple{Int,Int}) = min(dJ0, dJ1) + 1
+@inline function _length((dJ0, dJ1, dJs...),)
+    res = 0
+    dJ = abs(dJ0 - dJ1)
+    while dJ <= dJ0 + dJ1
+        res += _length((dJ, dJs...))
+        dJ += 2
+    end
+    return res
+end
+
+function Base.show(io::IO, iter::SpinManifoldIter)
+    print(io, "Atomic.SpinManifoldIter(")
+    isfirst = true
+    for dj in iter.dJs
+        if isfirst
+            isfirst = false
+        else
+            print(io, ", ")
+        end
+        show(io, half(dj))
+    end
+    print(io, ")")
+end
+
+Base.iterate(iter::SpinManifoldIter{0}, state=nothing) = nothing
+
+function Base.iterate(iter::SpinManifoldIter, state=nothing)
+    if state === nothing
+        state = _start(iter.dJs)
+    else
+        valid, state = _next(iter.dJs, state)
+        if !valid
+            return
+        end
+    end
+    return half.(state), state
+end
+
+Base.length(iter::SpinManifoldIter{0}) = 0
+Base.length(iter::SpinManifoldIter) = _length(sort(iter.dJs))
+
+Base.eltype(::Type{SpinManifoldIter{N}}) where N = NTuple{N,Half{Int}}
 
 end
