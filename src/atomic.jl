@@ -156,7 +156,7 @@ function Base.iterate(iter::SpinManifoldIter, state=nothing)
 end
 
 Base.length(iter::SpinManifoldIter{0}) = 0
-Base.length(iter::SpinManifoldIter) = _length(sort(iter.dJs))
+Base.length(iter::SpinManifoldIter) = _length(iter.dJs)
 
 Base.eltype(::Type{SpinManifoldIter{N}}) where N = NTuple{N,Half{Int}}
 
