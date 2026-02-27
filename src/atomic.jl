@@ -160,4 +160,97 @@ Base.length(iter::SpinManifoldIter) = _length(sort(iter.dJs))
 
 Base.eltype(::Type{SpinManifoldIter{N}}) where N = NTuple{N,Half{Int}}
 
+_double_spin(S) = S isa Number ? (_double(S),) : _double.(S)
+
+function _dipole_size(dL1, dL2, dS)
+    if abs(dL1 - dL2) > 2 || abs(dL1 - dL2) == 1
+        throw(ArgumentError("Angular momentum $(half(dL1)) and $(half(dL2)) not coupled via dipole"))
+    end
+    nS = prod((ds + 1 for ds in dS), init=1)
+    return (dL1 + 1) * nS, (dL2 + 1) * nS
+end
+
+function _dipole_couple!(M, dL1, dL2, Ωs, dS)
+    fill!(M, 0)
+    T = eltype(M)
+    RT = real(T)
+    nspin = length(dS)
+
+    offset1 = 0
+    for (i1, j1s) in enumerate(_double_spin_iter((dL1, dS...)))
+        jend1 = j1s[end]
+        njend1 = twice(jend1) + 1
+
+        offset2 = 0
+        for (i2, j2s) in enumerate(_double_spin_iter((dL2, dS...)))
+            jend2 = j2s[end]
+            njend2 = twice(jend2) + 1
+
+            forbidden = false
+            for (j1, j2) in zip(j1s, j2s)
+                if abs(j1 - j2) > 1
+                    forbidden = true
+                    break
+                end
+            end
+
+            if forbidden
+                offset2 += njend2
+                continue
+            end
+
+            scale = one(RT)
+            for si in 1:nspin
+                scale *= couple_reduced_element(RT, j1s[si + 1], j2s[si + 1],
+                                                half(dS[si]), j1s[si], j2s[si], 1)
+            end
+
+            for mj1 in -jend1:jend1
+                idx1 = twice(mj1 + jend1) ÷ 2 + 1 + offset1
+                @inbounds for Ωk in -1:1
+                    mj2 = mj1 + Ωk
+                    if !(-jend2 <= mj2 <= jend2)
+                        continue
+                    end
+                    Ω = Ωs[Ωk + 2]
+                    idx2 = twice(mj2 + jend2) ÷ 2 + 1 + offset2
+                    M[idx1, idx2] = Ω * (scale * clebschgordan(RT, jend2, mj2, 1, -Ωk,
+                                                                jend1, mj1))
+                end
+            end
+
+            offset2 += njend2
+        end
+        offset1 += njend1
+    end
+end
+
+function dipole_couple!(M, L1, L2, Ωs; S=())
+    dL1 = _double(L1)
+    dL2 = _double(L2)
+    dS = _double_spin(S)
+
+    sz = size(M)
+    sz_exp = _dipole_size(dL1, dL2, dS)
+
+    if sz != sz_exp
+        throw(DimensionError("Size mismatch: expected $(sz_exp) got $(sz)"))
+    end
+
+    _dipole_couple!(M, dL1, dL2, Ωs, dS)
+    return M
+end
+
+function dipole_couple(::Type{T}, L1, L2, Ωs; S=()) where T
+    dL1 = _double(L1)
+    dL2 = _double(L2)
+    dS = _double_spin(S)
+
+    M = Array{T}(undef, _dipole_size(dL1, dL2, dS))
+    _dipole_couple!(M, dL1, dL2, Ωs, dS)
+    return M
+end
+
+dipole_couple(L1, L2, Ωs; S=()) = dipole_couple(ComplexF64, L1, L2, Ωs; S=S)
+
 end
