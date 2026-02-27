@@ -170,7 +170,7 @@ function _dipole_size(dL1, dL2, dS)
     return (dL1 + 1) * nS, (dL2 + 1) * nS
 end
 
-function _dipole_couple!(M, dL1, dL2, Ωs, dS)
+function _dipole_couple_matrix!(M, dL1, dL2, Ωs, dS)
     fill!(M, 0)
     T = eltype(M)
     RT = real(T)
@@ -225,7 +225,7 @@ function _dipole_couple!(M, dL1, dL2, Ωs, dS)
     end
 end
 
-function dipole_couple!(M, L1, L2, Ωs; S=())
+function dipole_couple_matrix!(M, L1, L2, Ωs; S=())
     dL1 = _double(L1)
     dL2 = _double(L2)
     dS = _double_spin(S)
@@ -237,20 +237,20 @@ function dipole_couple!(M, L1, L2, Ωs; S=())
         throw(DimensionError("Size mismatch: expected $(sz_exp) got $(sz)"))
     end
 
-    _dipole_couple!(M, dL1, dL2, Ωs, dS)
+    _dipole_couple_matrix!(M, dL1, dL2, Ωs, dS)
     return M
 end
 
-function dipole_couple(::Type{T}, L1, L2, Ωs; S=()) where T
+function dipole_couple_matrix(::Type{T}, L1, L2, Ωs; S=()) where T
     dL1 = _double(L1)
     dL2 = _double(L2)
     dS = _double_spin(S)
 
     M = Array{T}(undef, _dipole_size(dL1, dL2, dS))
-    _dipole_couple!(M, dL1, dL2, Ωs, dS)
+    _dipole_couple_matrix!(M, dL1, dL2, Ωs, dS)
     return M
 end
 
-dipole_couple(L1, L2, Ωs; S=()) = dipole_couple(ComplexF64, L1, L2, Ωs; S=S)
+dipole_couple_matrix(L1, L2, Ωs; S=()) = dipole_couple_matrix(ComplexF64, L1, L2, Ωs; S=S)
 
 end
