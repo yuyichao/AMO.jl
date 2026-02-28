@@ -253,4 +253,115 @@ end
 
 dipole_couple_matrix(L1, L2, Ωs; S=()) = dipole_couple_matrix(ComplexF64, L1, L2, Ωs; S=S)
 
+function _hyperfine_matrix!(M, I, J, Bm, g_I, g_J, Ahf, Bhf, Chf)
+    T = eltype(M)
+    RT = real(T)
+
+    Fmin = abs(I - J)
+    Fmax = I + J
+
+    Foffset(F) = twice(Fmin + F - 1) * twice(F - Fmin) ÷ 8
+
+    g_J *= Bm
+    g_I *= Bm
+    zero_J = iszero(g_J)
+    zero_I = iszero(g_I)
+
+    fill!(M, 0)
+
+    int_spin = isinteger(Fmin)
+
+    @inbounds for F in Fmin:Fmax
+        Ehf = hyperfine(F; I=I, J=J, A=Ahf, B=Bhf, C=Chf)
+
+        offset = Foffset(F)
+        for i in 1:twice(F) + 1
+            M[i + offset, i + offset] = Ehf
+        end
+
+        if zero_J && zero_I
+            continue
+        end
+
+        for F′ in F:I + J
+            offset′ = Foffset(F′)
+            dF = twice(F′ - F) ÷ 2
+            for mF in half(int_spin ? 0 : 1):F
+                if iszero(mF) && F == F′
+                    continue
+                end
+                ele = zero(RT)
+                for mJ in max(-J, mF - I):min(J, mF + I)
+                    mI = mF - mJ
+                    term = g_J * mJ + g_I * mI
+                    if iszero(term)
+                        continue
+                    end
+                    ele += (RT(term) * clebschgordan(RT, I, mI, J, mJ, F, mF) *
+                            clebschgordan(RT, I, mI, J, mJ, F′, mF))
+                end
+                for flip_F in (false, true)
+                    if F′ == F && flip_F
+                        continue
+                    end
+                    if flip_F
+                        offset1 = offset
+                        offset2 = offset′
+                        F1 = F
+                        F2 = F′
+                    else
+                        offset1 = offset′
+                        offset2 = offset
+                        F1 = F′
+                        F2 = F
+                    end
+                    for flip_mF in (false, true)
+                        if iszero(mF) && flip_mF
+                            continue
+                        end
+                        val = ele
+                        _mF = mF
+                        if flip_mF
+                            if iseven(dF)
+                                val = -val
+                            end
+                            _mF = -mF
+                        end
+                        idx1 = offset1 + twice(_mF + F1) ÷ 2 + 1
+                        idx2 = offset2 + twice(_mF + F2) ÷ 2 + 1
+                        M[idx1, idx2] = val
+                        M[idx2, idx1] = val
+                    end
+                end
+            end
+        end
+    end
+end
+
+function hyperfine_matrix!(M; I, J, Bm=0, g_I=0, g_J=0, Ahf, Bhf, Chf=0)
+    dI = _double(I)
+    dJ = _double(J)
+    sz = size(M)
+    n_exp = (dI + 1) * (dJ + 1)
+
+    if sz != (n_exp, n_exp)
+        throw(DimensionError("Size mismatch: expected $((n_exp, n_exp)) got $(sz)"))
+    end
+
+    _hyperfine_matrix!(M, half(dI), half(dJ), Bm, g_I, g_J, Ahf, Bhf, Chf)
+    return M
+end
+
+function hyperfine_matrix(::Type{T}; I, J, Bm=0, g_I=0, g_J=0, Ahf, Bhf, Chf=0) where T
+    dI = _double(I)
+    dJ = _double(J)
+    n_exp = (dI + 1) * (dJ + 1)
+
+    M = Array{T}(undef, n_exp, n_exp)
+    _hyperfine_matrix!(M, half(dI), half(dJ), Bm, g_I, g_J, Ahf, Bhf, Chf)
+    return M
+end
+
+hyperfine_matrix(; kws...) = hyperfine_matrix(ComplexF64; kws...)
+
 end
