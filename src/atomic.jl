@@ -329,8 +329,12 @@ function _hyperfine_matrix!(M, I, J, Bm, g_I, g_J, Ahf, Bhf, Chf)
                         end
                         idx1 = offset1 + twice(_mF + F1) ÷ 2 + 1
                         idx2 = offset2 + twice(_mF + F2) ÷ 2 + 1
-                        M[idx1, idx2] = val
-                        M[idx2, idx1] = val
+                        if idx1 == idx2
+                            M[idx1, idx2] += val
+                        else
+                            M[idx1, idx2] = val
+                            M[idx2, idx1] = val
+                        end
                     end
                 end
             end
