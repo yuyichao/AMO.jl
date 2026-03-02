@@ -260,7 +260,7 @@ function _hyperfine_matrix!(M, I, J, Bm, g_I, g_J, Ahf, Bhf, Chf)
     Fmin = abs(I - J)
     Fmax = I + J
 
-    Foffset(F) = twice(Fmin + F - 1) * twice(F - Fmin) ÷ 8
+    Foffset(F) = twice(Fmin + F) * twice(F - Fmin) ÷ 4
 
     g_J *= Bm
     g_I *= Bm
