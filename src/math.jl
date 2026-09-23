@@ -2,11 +2,14 @@
 
 module Math
 
+using LinearAlgebra: BlasInt, BlasFloat
+using LinearAlgebra.BLAS: @blasfunc, libblastrampoline
+using LinearAlgebra.LAPACK: chklapackerror
 using SpecialFunctions
 
 export assoc_laguerre
 
-public Imaginary
+public Imaginary, HermEigenWorkspace, heevd!
 
 # LGPLv3 implementation from libstdc++
 
@@ -141,5 +144,68 @@ Base.promote_rule(::Type{Imaginary{T}}, ::Type{S}) where {T,S<:Real} =
 Base.promote_rule(::Type{Imaginary{T}}, ::Type{Complex{S}}) where {T,S} =
     Complex{promote_type(T, S)}
 Base.show(io::IO, a::Imaginary) = print(io, "Imaginary(", a.v, ")")
+
+
+"""
+    HermEigenWorkspace{T}(n)
+
+Preallocated workspace for the LAPACK Hermitian eigensolver `zheevd`/`cheevd`
+(divide and conquer) for `n × n` matrices with element type `T`
+(`ComplexF64` or `ComplexF32`), so that [`heevd!`](@ref) does not allocate.
+"""
+struct HermEigenWorkspace{T<:BlasFloat,RT<:Real}
+    V::Matrix{T}      # input (upper triangle), overwritten with the eigenvectors
+    λ::Vector{RT}
+    work::Vector{T}
+    rwork::Vector{RT}
+    iwork::Vector{BlasInt}
+end
+
+for (fname, elty, relty) in ((:zheevd_, :ComplexF64, :Float64), (:cheevd_, :ComplexF32, :Float32))
+    @eval begin
+        function _heevd_ccall!(V::Matrix{$elty}, λ::Vector{$relty}, work::Vector{$elty},
+                               rwork::Vector{$relty}, iwork::Vector{BlasInt},
+                               lwork::Integer, lrwork::Integer, liwork::Integer)
+            n = size(V, 1)
+            info = Ref{BlasInt}()
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
+                  (Ref{UInt8}, Ref{UInt8}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
+                   Ptr{$relty}, Ptr{$elty}, Ref{BlasInt}, Ptr{$relty}, Ref{BlasInt},
+                   Ptr{BlasInt}, Ref{BlasInt}, Ref{BlasInt}, Clong, Clong),
+                  'V', 'U', n, V, max(1, n), λ, work, lwork, rwork, lrwork, iwork, liwork,
+                  info, 1, 1)
+            chklapackerror(info[])
+            return
+        end
+        function HermEigenWorkspace{$elty}(n::Integer)
+            V = Matrix{$elty}(undef, n, n)
+            λ = Vector{$relty}(undef, n)
+            # Workspace query
+            work = Vector{$elty}(undef, 1)
+            rwork = Vector{$relty}(undef, 1)
+            iwork = Vector{BlasInt}(undef, 1)
+            _heevd_ccall!(V, λ, work, rwork, iwork, -1, -1, -1)
+            resize!(work, max(BlasInt(real(work[1])), 1))
+            resize!(rwork, max(BlasInt(rwork[1]), 1))
+            resize!(iwork, max(iwork[1], 1))
+            return HermEigenWorkspace{$elty,$relty}(V, λ, work, rwork, iwork)
+        end
+    end
+end
+
+"""
+    heevd!(ws::HermEigenWorkspace, A::AbstractMatrix)
+
+Eigendecomposition of the Hermitian matrix `A` (only the upper triangle is accessed)
+using the workspace `ws`. Returns the eigenvalues (ascending) and the matrix of
+eigenvectors, both aliasing the workspace and therefore overwritten by the next call.
+"""
+function heevd!(ws::HermEigenWorkspace, A::AbstractMatrix)
+    V = ws.V
+    copyto!(V, A)
+    _heevd_ccall!(V, ws.λ, ws.work, ws.rwork, ws.iwork, length(ws.work), length(ws.rwork),
+                  length(ws.iwork))
+    return ws.λ, V
+end
 
 end

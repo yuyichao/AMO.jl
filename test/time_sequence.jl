@@ -539,6 +539,27 @@ end
         end
     end
 
+    @testset "Allocations" begin
+        MT = Matrix{ComplexF64}
+        alloc_compute!(res, step, grads) = @allocated TS.compute!(res, step, grads)
+        for n in (2, 3, 4, 8)
+            Hs = Tuple(Matrix(Hermitian(randn(rng, ComplexF64, n, n))) for _ in 1:3)
+            H0 = Matrix(Hermitian(randn(rng, ComplexF64, n, n)))
+            for param_t in (false, true)
+                step = TS.ConstMatrixStep{MT}(Hs; H0=H0, param_t=param_t)
+                NP = TS.nparams(step)
+                TS.set_params!(step, randn(rng, NP))
+                res = zeros(ComplexF64, n, n)
+                grads = [zeros(ComplexF64, n, n) for _ in 1:NP]
+                # Warm up, then the in-place Hermitian path must not allocate
+                alloc_compute!(res, step, MT[])
+                alloc_compute!(res, step, grads)
+                @test alloc_compute!(res, step, MT[]) == 0
+                @test alloc_compute!(res, step, grads) == 0
+            end
+        end
+    end
+
     @testset "Errors" begin
         MT = Matrix{ComplexF64}
         @test_throws ArgumentError TS.ConstMatrixStep{MT}(())

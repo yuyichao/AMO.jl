@@ -3,9 +3,10 @@
 module TimeSequence
 
 using LinearAlgebra
+using LinearAlgebra: BlasFloat
 using StaticArrays
 
-using ..Math: Imaginary
+using ..Math: Imaginary, HermEigenWorkspace, heevd!
 
 public AbstractStep, support_inplace_compute, compute, compute!, set_params!,
     get_init, get_mul, get_mul!, Sequence, ConstMatrixStep, QobjEvoStep
@@ -296,13 +297,14 @@ end
 const _NEG_IM = Imaginary(-1)
 
 # Buffers used by the in-place `compute!` for mutable matrix types.
-struct _TIBuffers{MT<:AbstractMatrix,VT<:AbstractVector}
+struct _TIBuffers{MT<:AbstractMatrix,VT<:AbstractVector,EW}
     A::MT    # assembled generator
     Φ::MT    # divided differences of exp in the eigenbasis
     tmp1::MT
     tmp2::MT
     h::VT    # exp(-im * t * λ / 2)
     eλ::VT   # exp(-im * t * λ)
+    eig::EW  # `HermEigenWorkspace` for dense matrices with BLAS element types, else `nothing`
 end
 
 """
@@ -374,8 +376,9 @@ mutable struct ConstMatrixStep{OP<:AbstractMatrix,NParams,NH,PT,Herm,H0T,Buf} <:
         t = convert(PT, t)
         NParams = NH + Int(param_t)
         if ismutabletype(OP)
+            eig = (OP <: Matrix && T <: BlasFloat && hermitian) ? HermEigenWorkspace{T}(n) : nothing
             buf = _TIBuffers(similar(ref, T), similar(ref, T), similar(ref, T), similar(ref, T),
-                             similar(ref, T, n), similar(ref, T, n))
+                             similar(ref, T, n), similar(ref, T, n), eig)
         else
             buf = nothing
         end
@@ -423,6 +426,22 @@ end
     V = E.vectors
     return E.values, V, inv(V)
 end
+
+# In-place variants for `compute!`: use the preallocated LAPACK workspace when available,
+# and a buffer for the input copy of the general eigendecomposition.
+@inline _eigen_decomp!(buf::_TIBuffers, A, ::Val{true}) = _eigen_decomp_herm!(buf.eig, A)
+@inline function _eigen_decomp_herm!(ws::HermEigenWorkspace, A)
+    λ, V = heevd!(ws, A)
+    return λ, V, V'
+end
+@inline _eigen_decomp_herm!(::Nothing, A) = _eigen_decomp(A, Val(true))
+@inline function _eigen_decomp!(buf::_TIBuffers, A::Matrix, ::Val{false})
+    # `Φ` is not needed until after the eigendecomposition
+    E = eigen!(copyto!(buf.Φ, A))
+    V = E.vectors
+    return E.values, V, inv(V)
+end
+@inline _eigen_decomp!(buf::_TIBuffers, A, ::Val{false}) = _eigen_decomp(A, Val(false))
 
 @inline _to_op(::Type{OP}, m) where OP = convert(OP, m)
 
@@ -625,7 +644,7 @@ function compute!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) w
     if size(A) == (2, 2)
         return _compute2!(res, step, A, s, grad)
     end
-    λ, V, W = _eigen_decomp(A, Val(Herm))
+    λ, V, W = _eigen_decomp!(buf, A, Val(Herm))
     h = buf.h
     eλ = buf.eλ
     h .= exp.((s / 2) .* λ)

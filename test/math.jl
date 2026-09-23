@@ -71,3 +71,33 @@ end
     @test zero(Im{Float64}) == Im(0.0)
     @test sprint(show, Im(1.5)) == "Imaginary(1.5)"
 end
+
+using LinearAlgebra
+using Random
+
+@testset "heevd!" begin
+    rng = Xoshiro(99)
+    alloc_heevd!(ws, A) = @allocated M.heevd!(ws, A)
+    for T in (ComplexF64, ComplexF32), n in (1, 2, 3, 5, 12)
+        ws = M.HermEigenWorkspace{T}(n)
+        for _ in 1:5
+            A = Matrix(Hermitian(randn(rng, T, n, n)))
+            λ, V = M.heevd!(ws, A)
+            @test λ isa Vector{real(T)}
+            @test V isa Matrix{T}
+            @test issorted(λ)
+            @test V * Diagonal(λ) * V' ≈ A
+            @test V' * V ≈ I
+            E = eigen(Hermitian(A))
+            @test λ ≈ E.values
+            # Only the upper triangle is accessed
+            B = copy(A)
+            B[2:end, 1] .= 0
+            λ2, _ = M.heevd!(ws, B)
+            @test λ2 ≈ E.values
+        end
+        A = Matrix(Hermitian(randn(rng, T, n, n)))
+        alloc_heevd!(ws, A)
+        @test alloc_heevd!(ws, A) == 0
+    end
+end
