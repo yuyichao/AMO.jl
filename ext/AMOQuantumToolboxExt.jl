@@ -106,7 +106,7 @@ function (f::_PropUpdate)(A, u, p, t)
     copyto!(nz, terms.H0nz)
     foreach(terms.λss, terms.Onz) do λs, Onz
         c = _scalars_value(λs, pm, t)
-        @. nz += c * Onz
+        @. nz = muladd(c, Onz, nz)
     end
     return A
 end
@@ -131,12 +131,12 @@ function (f::_AugUpdate{TT,T,K})(M, u, p, t) where {TT,T,K}
     foreach(terms.λss, terms.Onz) do λs, Onz
         c = _scalars_value(λs, pm, t)
         cv = _dual_value(c)
-        @. Anz += cv * Onz
+        @. Anz = muladd(cv, Onz, Anz)
         for k in 1:K
             ck = _dual_partial(c, k)
             if !iszero(ck)
-                Bk = Bnz[k]
-                @. Bk += ck * Onz
+                Bk = @inbounds Bnz[k]
+                @. Bk = muladd(ck, Onz, Bk)
             end
         end
     end
@@ -148,9 +148,9 @@ function _scatter!(M, f::_AugUpdate{TT,T,K}, Anz, Bnz) where {TT,T,K}
     @inbounds for (q, s) in zip(f.destA, f.srcA)
         nz[q] = Anz[s]
     end
-    for k in 1:K
+    @inbounds for k in 1:K
         Bk = Bnz[k]
-        @inbounds for (q, s) in zip(f.destB[k], f.srcB[k])
+        for (q, s) in zip(f.destB[k], f.srcB[k])
             nz[q] = Bk[s]
         end
     end
@@ -302,7 +302,7 @@ function TimeSequence.compute(step::QobjEvoStep{OP,NParams}, grad) where {OP,NPa
     end
     @assert length(grad) == NParams
     y = _solve(step, step.H_aug, step.ψ0_aug)
-    for k in 1:NParams
+    @inbounds for k in 1:NParams
         grad[k] = _to_op(OP, _block(y, n, k))
     end
     return _to_op(OP, _block(y, n, 0))
@@ -319,7 +319,7 @@ function TimeSequence.compute!(res::OP, step::QobjEvoStep{OP,NParams}, grad) whe
     end
     @assert length(grad) == NParams
     y = _solve(step, step.H_aug, step.ψ0_aug)
-    for k in 1:NParams
+    @inbounds for k in 1:NParams
         copyto!(grad[k], _block(y, n, k))
     end
     copyto!(res, _block(y, n, 0))

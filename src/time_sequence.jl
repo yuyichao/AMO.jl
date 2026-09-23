@@ -397,9 +397,9 @@ support_inplace_compute(::Type{<:ConstMatrixStep{OP}}) where OP = ismutabletype(
 function set_params!(step::ConstMatrixStep{OP,NParams,NH,PT},
                      params::AbstractVector) where {OP,NParams,NH,PT}
     @assert length(params) == NParams
-    step.coeffs = SVector{NH,PT}(ntuple(k->PT(params[k]), Val(NH)))
+    step.coeffs = SVector{NH,PT}(ntuple(k->PT(@inbounds(params[k])), Val(NH)))
     if NParams > NH
-        step.t = PT(params[NParams])
+        step.t = PT(@inbounds params[NParams])
     end
     return
 end
@@ -433,9 +433,9 @@ end
     end
     Hs = step.Hs
     coeffs = step.coeffs
-    A = coeffs[1] * Hs[1]
-    for k in 2:NH
-        A = A + coeffs[k] * Hs[k]
+    A = @inbounds coeffs[1] * Hs[1]
+    @inbounds for k in 2:NH
+        A = muladd.(coeffs[k], Hs[k], A)
     end
     if H0 !== nothing
         A = A + H0
@@ -506,7 +506,7 @@ end
 @inline function _expm2(A, s, ::Val{Herm}) where Herm
     a0, ax, ay, az = _pauli2(A, Val(Herm))
     s2 = s * s
-    r2 = s2 * (ax * ax + ay * ay + az * az)
+    r2 = s2 * muladd(ax, ax, muladd(ay, ay, az * az))
     f0, f1, f2 = _expm2_coefs(r2)
     ex0 = exp(s * a0)
     g = ex0 * (f1 * s)
@@ -516,13 +516,13 @@ end
 # Entries of the Fréchet derivative of exp(s * A) in the direction s * H
 @inline function _expm2_frechet(H, s, ::Val{Herm}, (ax, ay, az, s2, f0, f1, f2, ex0)) where Herm
     h0, hx, hy, hz = _pauli2(H, Val(Herm))
-    xe = s2 * (ax * hx + ay * hy + az * hz)
+    xe = s2 * muladd(ax, hx, muladd(ay, hy, az * hz))
     e0 = s * h0
     d0 = ex0 * (e0 * f0 + f1 * xe)
     β = e0 * f1 + f2 * xe
     γ = ex0 * s
-    return _pauli2_entries(d0, γ * (β * ax + f1 * hx), γ * (β * ay + f1 * hy),
-                           γ * (β * az + f1 * hz))
+    return _pauli2_entries(d0, γ * muladd(β, ax, f1 * hx), γ * muladd(β, ay, f1 * hy),
+                           γ * muladd(β, az, f1 * hz))
 end
 @inline function _set2!(M, (m11, m21, m12, m22))
     @inbounds M[1, 1] = m11
@@ -538,11 +538,11 @@ function _compute2(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, A, s, grad) whe
     if !isempty(grad)
         @assert length(grad) == NParams
         Hs = step.Hs
-        for k in 1:NH
+        @inbounds for k in 1:NH
             grad[k] = _to_op(OP, SMatrix{2,2}(_expm2_frechet(Hs[k], s, Val(Herm), parts)))
         end
         if NParams > NH
-            grad[NParams] = _to_op(OP, _NEG_IM .* (A * Um))
+            @inbounds grad[NParams] = _to_op(OP, _NEG_IM .* (A * Um))
         end
     end
     return Um
@@ -554,11 +554,11 @@ function _compute2!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, A, s,
     if !isempty(grad)
         @assert length(grad) == NParams
         Hs = step.Hs
-        for k in 1:NH
+        @inbounds for k in 1:NH
             _set2!(grad[k], _expm2_frechet(Hs[k], s, Val(Herm), parts))
         end
         if NParams > NH
-            mul!(grad[NParams], A, res, -im, false)
+            mul!(@inbounds(grad[NParams]), A, res, -im, false)
         end
     end
     return res
@@ -578,11 +578,11 @@ function compute(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) where {OP,N
         @assert length(grad) == NParams
         Φ = _phi.(s, h, transpose(h), λ, transpose(λ))
         Hs = step.Hs
-        for k in 1:NH
+        @inbounds for k in 1:NH
             grad[k] = _to_op(OP, V * (Φ .* (W * Hs[k] * V)) * W)
         end
         if NParams > NH
-            grad[NParams] = _to_op(OP, _NEG_IM .* (A * U))
+            @inbounds grad[NParams] = _to_op(OP, _NEG_IM .* (A * U))
         end
     end
     return _to_op(OP, U)
@@ -597,7 +597,7 @@ function _assemble!(A, step::ConstMatrixStep{OP,NParams,NH}) where {OP,NParams,N
     end
     Hs = step.Hs
     coeffs = step.coeffs
-    for k in 1:NH
+    @inbounds for k in 1:NH
         axpy!(coeffs[k], Hs[k], A)
     end
     return A
@@ -639,7 +639,7 @@ function compute!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) w
         @assert length(grad) == NParams
         Φ = _fill_phi!(buf.Φ, s, h, λ)
         Hs = step.Hs
-        for k in 1:NH
+        @inbounds for k in 1:NH
             mul!(tmp1, Hs[k], V)
             mul!(tmp2, W, tmp1)
             tmp2 .*= Φ
@@ -648,7 +648,7 @@ function compute!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) w
         end
         if NParams > NH
             # -im * A * U. The scaling is done by BLAS for strided matrices.
-            mul!(grad[NParams], A, res, -im, false)
+            mul!(@inbounds(grad[NParams]), A, res, -im, false)
         end
     end
     return res
@@ -712,7 +712,7 @@ end
 
 function set_params!(step::QobjEvoStep{OP,NParams,PT}, params::AbstractVector) where {OP,NParams,PT}
     @assert length(params) == NParams
-    step.params = SVector{NParams,PT}(ntuple(k->PT(params[k]), Val(NParams)))
+    step.params = SVector{NParams,PT}(ntuple(k->PT(@inbounds(params[k])), Val(NParams)))
     return
 end
 
