@@ -6,6 +6,8 @@ using SpecialFunctions
 
 export assoc_laguerre
 
+public Imaginary
+
 # LGPLv3 implementation from libstdc++
 
 # function poly_laguerre_large_n(n::Integer, α, x::Tp) where Tp
@@ -101,5 +103,43 @@ function (genlaguerre(n::Integer, α, x::Tp)::Tp) where Tp<:AbstractFloat
     end
 end
 assoc_laguerre(x, n::Integer, α=0.0) = genlaguerre(n, α, float(x))
+
+"""
+    Imaginary(v)
+
+A purely imaginary number `v * im` with real `v`. Multiplication with a real number,
+a complex number or another `Imaginary` only performs the necessary real
+operations, and `exp` of an `Imaginary` is computed with `cis`.
+This lets the compiler exploit the vanishing real part, e.g. for the `-im * t`
+factor in a time evolution operator.
+"""
+struct Imaginary{T<:Real} <: Number
+    v::T
+end
+@inline Base.real(a::Imaginary) = zero(a.v)
+@inline Base.imag(a::Imaginary) = a.v
+@inline Base.iszero(a::Imaginary) = iszero(a.v)
+@inline Base.zero(a::Imaginary) = Imaginary(zero(a.v))
+@inline Base.zero(::Type{Imaginary{T}}) where T = Imaginary(zero(T))
+@inline Base.:-(a::Imaginary) = Imaginary(-a.v)
+@inline Base.:*(a::Imaginary, b::Real) = Imaginary(a.v * b)
+@inline Base.:*(b::Real, a::Imaginary) = Imaginary(b * a.v)
+# Avoid ambiguity with the `Bool * Number` methods in Base
+@inline Base.:*(a::Imaginary, b::Bool) = Imaginary(a.v * b)
+@inline Base.:*(b::Bool, a::Imaginary) = Imaginary(b * a.v)
+@inline Base.:*(a::Imaginary, b::Imaginary) = -(a.v * b.v)
+@inline Base.:*(a::Imaginary, z::Complex) = Complex(-(a.v * imag(z)), a.v * real(z))
+@inline Base.:*(z::Complex, a::Imaginary) = Complex(-(imag(z) * a.v), real(z) * a.v)
+@inline Base.:/(a::Imaginary, b::Real) = Imaginary(a.v / b)
+@inline Base.exp(a::Imaginary) = cis(a.v)
+Base.Complex{T}(a::Imaginary) where T<:Real = Complex{T}(zero(T), a.v)
+Base.Complex(a::Imaginary) = Complex(zero(a.v), a.v)
+Base.promote_rule(::Type{Imaginary{T}}, ::Type{Imaginary{S}}) where {T,S} =
+    Imaginary{promote_type(T, S)}
+Base.promote_rule(::Type{Imaginary{T}}, ::Type{S}) where {T,S<:Real} =
+    Complex{promote_type(T, S)}
+Base.promote_rule(::Type{Imaginary{T}}, ::Type{Complex{S}}) where {T,S} =
+    Complex{promote_type(T, S)}
+Base.show(io::IO, a::Imaginary) = print(io, "Imaginary(", a.v, ")")
 
 end

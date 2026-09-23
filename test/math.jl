@@ -40,3 +40,34 @@ end
         test_assoc_laguerre(-v, -v, 10000)
     end
 end
+
+@testset "Imaginary" begin
+    Im = M.Imaginary
+    for v in (0.0, 1.0, -2.5, 3), z in (1.0 + 2.0im, -0.3 + 0.0im, 0.0 - 4im, 2 + 3im)
+        a = Im(v)
+        ref = v * im
+        @test real(a) == 0
+        @test imag(a) == v
+        @test iszero(a) == iszero(v)
+        @test Complex(a) == ref
+        @test ComplexF64(a) == ref && ComplexF64(a) isa ComplexF64
+        @test a * z == ref * z
+        @test z * a == z * ref
+        @test a * 2.5 == Im(v * 2.5)
+        @test 2.5 * a == Im(v * 2.5)
+        @test a * 2 == Im(v * 2)
+        @test a * true == Im(v)
+        @test iszero(a * false)
+        @test true * a == Im(v)
+        @test iszero(false * a)
+        @test a / 2 == Im(v / 2)
+        @test a * Im(3.0) == -(v * 3.0)
+        @test -a == Im(-v)
+        @test exp(a) ≈ exp(ref)
+        @test promote(a, 1.0) == (ref, 1.0)
+        @test promote(a, 1.0im) == (ref, 1.0im)
+    end
+    @test zero(Im(1.0)) == Im(0.0)
+    @test zero(Im{Float64}) == Im(0.0)
+    @test sprint(show, Im(1.5)) == "Imaginary(1.5)"
+end
