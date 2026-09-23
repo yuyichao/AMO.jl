@@ -2,10 +2,13 @@
 
 module TimeSequence
 
+using LinearAlgebra
 using StaticArrays
 
+using ..Math: Imaginary
+
 public AbstractStep, support_inplace_compute, compute, compute!, set_params!,
-    get_init, get_mul, get_mul!, Sequence
+    get_init, get_mul, get_mul!, Sequence, ConstMatrixStep
 
 abstract type AbstractStep{OP,NParams} end
 
@@ -285,6 +288,242 @@ function compute!(res::OP, s::Sequence{OP,NSteps,Steps,NParams}, grads) where {O
     end
     mul!(res, prev, last_val)
     has_grad && _eval_grads(s, grads, nothing, mul!, first_val, last_val)
+    return res
+end
+
+##### Time-independent parametrized matrix operator
+
+const _NEG_IM = Imaginary(-1)
+
+# Buffers used by the in-place `compute!` for mutable matrix types.
+struct _TIBuffers{MT<:AbstractMatrix,VT<:AbstractVector}
+    A::MT    # assembled generator
+    Φ::MT    # divided differences of exp in the eigenbasis
+    tmp1::MT
+    tmp2::MT
+    h::VT    # exp(-im * t * λ / 2)
+    eλ::VT   # exp(-im * t * λ)
+end
+
+"""
+    ConstMatrixStep{OP}(Hs; H0=nothing, t=1, param_t=false, hermitian=nothing)
+
+A step whose operator is the time evolution under a time-independent, linearly
+parametrized Hamiltonian. With `NH = length(Hs)`, coefficients `c` and duration `t`,
+the operator is (with `ħ = 1`)
+
+    U = exp(-im * t * (H0 + c[1] * Hs[1] + ... + c[NH] * Hs[NH]))
+
+The step has `NH` parameters, the coefficients `c`, and, if `param_t=true`,
+one additional trailing parameter for the duration `t`.
+Otherwise `t` is fixed to the value of the keyword argument.
+`Hs` may be empty, e.g. to describe a free evolution under `H0` for a variable time.
+
+`OP` is the matrix type of the result (e.g. `Matrix{ComplexF64}` or
+`SMatrix{2,2,ComplexF64,4}`) and must have a complex element type.
+`Hs` (a tuple) and `H0` are converted to `OP`.
+
+If `hermitian` is not given, it is inferred from the generator matrices.
+For a Hermitian generator (real coefficients are assumed), the exponential and
+its derivatives are computed with a Hermitian eigendecomposition (only the upper
+triangle of the assembled generator is accessed when `hermitian=true` is forced).
+Otherwise a general eigendecomposition is used, which requires the generator to be
+diagonalizable.
+
+The gradient WRT `c[k]` is the Fréchet derivative of the matrix exponential in the
+direction `-im * t * Hs[k]`, evaluated in the eigenbasis using divided differences
+of `exp`, which is well-behaved for (nearly) degenerate eigenvalues.
+The gradient WRT `t` is `-im * A * U`, where `A` is the assembled generator.
+
+In-place evaluation (`compute!`) is supported when `OP` is a mutable matrix type
+(e.g. `Matrix`), in which case the working buffers are allocated once at construction.
+The eigendecomposition itself still allocates its result arrays.
+The step provides [`get_init`](@ref), so a [`Sequence`](@ref) of these steps
+can be constructed without an explicit `init`.
+"""
+mutable struct ConstMatrixStep{OP<:AbstractMatrix,NParams,NH,PT,Herm,H0T,Buf} <: AbstractStep{OP,NParams}
+    const H0::H0T
+    const Hs::NTuple{NH,OP}
+    coeffs::SVector{NH,PT}
+    t::PT
+    const buf::Buf
+
+    function ConstMatrixStep{OP}(Hs; H0=nothing, t=1, param_t::Bool=false,
+                                     hermitian::Union{Bool,Nothing}=nothing) where OP<:AbstractMatrix
+        T = eltype(OP)
+        if !(T <: Complex)
+            throw(ArgumentError("`OP` must have a complex element type, got $OP"))
+        end
+        PT = real(T)
+        Hs = map(H->convert(OP, H)::OP, Tuple(Hs))
+        NH = length(Hs)
+        H0 = H0 === nothing ? nothing : convert(OP, H0)::OP
+        ref = NH > 0 ? Hs[1] : H0
+        if ref === nothing
+            throw(ArgumentError("At least one generator matrix (`Hs` or `H0`) is required"))
+        end
+        n = size(ref, 1)
+        for H in (H0 === nothing ? Hs : (H0, Hs...))
+            if size(H) != (n, n)
+                throw(DimensionMismatch("All generator matrices must be square and of the same size"))
+            end
+        end
+        if hermitian === nothing
+            hermitian = all(ishermitian, Hs) && (H0 === nothing || ishermitian(H0))
+        end
+        t = convert(PT, t)
+        NParams = NH + Int(param_t)
+        if ismutabletype(OP)
+            buf = _TIBuffers(similar(ref, T), similar(ref, T), similar(ref, T), similar(ref, T),
+                             similar(ref, T, n), similar(ref, T, n))
+        else
+            buf = nothing
+        end
+        return new{OP,NParams,NH,PT,hermitian,typeof(H0),typeof(buf)}(
+            H0, Hs, zero(SVector{NH,PT}), t, buf)
+    end
+end
+
+@inline _ref_matrix(step::ConstMatrixStep{OP,NParams,NH}) where {OP,NParams,NH} =
+    NH == 0 ? step.H0 : step.Hs[1]
+
+function get_init(step::ConstMatrixStep)
+    ref = _ref_matrix(step)
+    return ()->zero(ref)
+end
+
+support_inplace_compute(::Type{<:ConstMatrixStep{OP}}) where OP = ismutabletype(OP)
+
+function set_params!(step::ConstMatrixStep{OP,NParams,NH,PT},
+                     params::AbstractVector) where {OP,NParams,NH,PT}
+    @assert length(params) == NParams
+    step.coeffs = SVector{NH,PT}(ntuple(k->PT(params[k]), Val(NH)))
+    if NParams > NH
+        step.t = PT(params[NParams])
+    end
+    return
+end
+
+# sinh(z) / z, continuous at 0
+@inline _sinhc(z) = iszero(z) ? one(z) : sinh(z) / z
+@inline function _sinhc(z::Imaginary)
+    y = z.v
+    return iszero(y) ? one(y) : sin(y) / y
+end
+# s * (exp(s λi) - exp(s λj)) / (s λi - s λj), with h = exp(s λ / 2), continuous at λi == λj
+@inline _phi(s, hi, hj, λi, λj) = s * hi * hj * _sinhc(s * (λi - λj) / 2)
+
+@inline function _eigen_decomp(A, ::Val{true})
+    E = eigen(Hermitian(A))
+    V = E.vectors
+    return E.values, V, V'
+end
+@inline function _eigen_decomp(A, ::Val{false})
+    E = eigen(convert(Matrix, A))
+    V = E.vectors
+    return E.values, V, inv(V)
+end
+
+@inline _to_op(::Type{OP}, m) where OP = convert(OP, m)
+
+@inline function _assemble(step::ConstMatrixStep{OP,NParams,NH}) where {OP,NParams,NH}
+    H0 = step.H0
+    if NH == 0
+        return H0
+    end
+    Hs = step.Hs
+    coeffs = step.coeffs
+    A = coeffs[1] * Hs[1]
+    for k in 2:NH
+        A = A + coeffs[k] * Hs[k]
+    end
+    if H0 !== nothing
+        A = A + H0
+    end
+    return A
+end
+
+function compute(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) where {OP,NParams,NH,PT,Herm}
+    A = _assemble(step)
+    s = Imaginary(-step.t)
+    λ, V, W = _eigen_decomp(A, Val(Herm))
+    h = exp.((s / 2) .* λ)
+    eλ = h .* h
+    U = (V .* transpose(eλ)) * W
+    if !isempty(grad)
+        @assert length(grad) == NParams
+        Φ = _phi.(s, h, transpose(h), λ, transpose(λ))
+        Hs = step.Hs
+        for k in 1:NH
+            grad[k] = _to_op(OP, V * (Φ .* (W * Hs[k] * V)) * W)
+        end
+        if NParams > NH
+            grad[NParams] = _to_op(OP, _NEG_IM .* (A * U))
+        end
+    end
+    return _to_op(OP, U)
+end
+
+function _assemble!(A, step::ConstMatrixStep{OP,NParams,NH}) where {OP,NParams,NH}
+    H0 = step.H0
+    if H0 === nothing
+        fill!(A, zero(eltype(A)))
+    else
+        copyto!(A, H0)
+    end
+    Hs = step.Hs
+    coeffs = step.coeffs
+    for k in 1:NH
+        axpy!(coeffs[k], Hs[k], A)
+    end
+    return A
+end
+
+function _fill_phi!(Φ, s, h, λ)
+    n = length(λ)
+    @inbounds for j in 1:n
+        hj = h[j]
+        λj = λ[j]
+        for i in 1:n
+            Φ[i, j] = _phi(s, h[i], hj, λ[i], λj)
+        end
+    end
+    return Φ
+end
+
+function compute!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) where {OP,NParams,NH,PT,Herm}
+    buf = step.buf
+    if buf === nothing
+        throw(ArgumentError("In-place compute is not supported for immutable matrix type $OP"))
+    end
+    A = _assemble!(buf.A, step)
+    s = Imaginary(-step.t)
+    λ, V, W = _eigen_decomp(A, Val(Herm))
+    h = buf.h
+    eλ = buf.eλ
+    h .= exp.((s / 2) .* λ)
+    eλ .= h .* h
+    tmp1 = buf.tmp1
+    tmp2 = buf.tmp2
+    copyto!(tmp1, V)
+    rmul!(tmp1, Diagonal(eλ))
+    mul!(res, tmp1, W)
+    if !isempty(grad)
+        @assert length(grad) == NParams
+        Φ = _fill_phi!(buf.Φ, s, h, λ)
+        Hs = step.Hs
+        for k in 1:NH
+            mul!(tmp1, Hs[k], V)
+            mul!(tmp2, W, tmp1)
+            tmp2 .*= Φ
+            mul!(tmp1, V, tmp2)
+            mul!(grad[k], tmp1, W)
+        end
+        if NParams > NH
+            # -im * A * U. The scaling is done by BLAS for strided matrices.
+            mul!(grad[NParams], A, res, -im, false)
+        end
+    end
     return res
 end
 

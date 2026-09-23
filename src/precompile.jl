@@ -109,6 +109,21 @@ let
         Pauli.ibch(op, op, workspace=ws, max_order=1)
     end
 
+    let σx = [0 1; 1 0], σz = [1 0; 0 -1]
+        for OP in (Matrix{ComplexF64}, TimeSequence.SMatrix{2,2,ComplexF64,4})
+            step = TimeSequence.ConstMatrixStep{OP}((σx, σz); param_t=true)
+            TimeSequence.set_params!(step, [0.1, 0.2, 0.3])
+            grads = [OP(zeros(2, 2)) for _ in 1:3]
+            TimeSequence.compute(step, OP[])
+            TimeSequence.compute(step, grads)
+            if TimeSequence.support_inplace_compute(typeof(step))
+                res = OP(zeros(2, 2))
+                TimeSequence.compute!(res, step, OP[])
+                TimeSequence.compute!(res, step, grads)
+            end
+        end
+    end
+
     for F in Any[0.5, 1]
         for J in Any[0.5, 1]
             for I in Any[0.5, 1]
