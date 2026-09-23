@@ -9,6 +9,7 @@ pmap(["pauli",
       "trap",
       "rand",
       "time_sequence",
+      "quantum_toolbox",
       "math",
       "utils",
       ]) do file

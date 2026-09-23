@@ -8,7 +8,7 @@ using StaticArrays
 using ..Math: Imaginary
 
 public AbstractStep, support_inplace_compute, compute, compute!, set_params!,
-    get_init, get_mul, get_mul!, Sequence, ConstMatrixStep
+    get_init, get_mul, get_mul!, Sequence, ConstMatrixStep, QobjEvoStep
 
 abstract type AbstractStep{OP,NParams} end
 
@@ -525,6 +525,68 @@ function compute!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) w
         end
     end
     return res
+end
+
+
+##### Step defined by a (time-dependent) QuantumToolbox operator
+# The constructor and `compute`/`compute!` are implemented in the `AMOQuantumToolboxExt`
+# package extension, which is loaded together with `QuantumToolbox`.
+
+"""
+    QobjEvoStep{OP}(H::AbstractQuantumObject; nparams, tspan, param_map=identity, kwargs...)
+    QobjEvoStep(H::AbstractQuantumObject; kwargs...)
+
+A step whose operator is the time evolution under a `QuantumObject` or a (time-dependent)
+`QuantumObjectEvolution` (`QobjEvo`) `H` from `QuantumToolbox`, from `tspan[1]` to
+`tspan[2]`. This requires the `QuantumToolbox` package to be loaded.
+
+The time-dependent coefficients `f(p, t)` of `H` receive `param_map(p)` as their first
+argument, where `p` is an `SVector` of the `nparams` parameters of the step
+(possibly containing `ForwardDiff.Dual` numbers). Use `param_map` to, e.g., convert the
+parameters into a `NamedTuple` expected by the coefficient functions.
+The coefficient functions must be generic in the element type of `p`.
+
+For an `Operator` (a Hamiltonian ``H``), the operator of the step is the propagator
+``U = T\\exp(-i∫H dt)``. For a `SuperOperator` (a Liouvillian ``L``), it is
+``T\\exp(∫L dt)`` acting on the vectorized (column stacking) density matrix.
+
+The propagator is computed with `QuantumToolbox.sesolve` using the identity operator as
+the initial state. The gradient WRT the parameters is computed by solving the sensitivity
+equations ``∂_t (∂_k U) = -i (H ∂_k U + (∂_k H) U)`` together with the propagator as a
+single (vectorized) `sesolve` problem, where ``∂_k H`` is obtained by forward-mode
+automatic differentiation of the coefficient functions. The accuracy of both the
+operator and its gradient are therefore determined by the ODE solver options,
+which can be passed as keyword arguments (e.g. `alg`, `reltol`, `abstol`) and are
+forwarded to `sesolve`.
+
+`OP` is the matrix type of the result (e.g. `Matrix{ComplexF64}` or
+`SMatrix{2,2,ComplexF64,4}`) and defaults to a dense `Matrix` with the complex element
+type of `H`. The step provides [`get_init`](@ref), so a [`Sequence`](@ref) of these steps
+can be constructed without an explicit `init`.
+"""
+mutable struct QobjEvoStep{OP<:AbstractMatrix,NParams,PT,HP,SP,HA,SA,KW} <: AbstractStep{OP,NParams}
+    const H_prop::HP  # operator for the propagator
+    const ψ0_prop::SP # initial state (identity) for `H_prop`
+    const H_aug::HA   # (vectorized) operator for the propagator and its sensitivities
+    const ψ0_aug::SA  # initial state for `H_aug`
+    const n::Int      # size of the operator
+    const t0::PT
+    const t1::PT
+    const kwargs::KW  # forwarded to the solver
+    params::SVector{NParams,PT}
+end
+
+support_inplace_compute(::Type{<:QobjEvoStep{OP}}) where OP = ismutabletype(OP)
+
+function get_init(step::QobjEvoStep{OP}) where OP
+    n = step.n
+    return ()->convert(OP, zeros(eltype(OP), n, n))
+end
+
+function set_params!(step::QobjEvoStep{OP,NParams,PT}, params::AbstractVector) where {OP,NParams,PT}
+    @assert length(params) == NParams
+    step.params = SVector{NParams,PT}(ntuple(k->PT(params[k]), Val(NParams)))
+    return
 end
 
 end
