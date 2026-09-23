@@ -399,10 +399,9 @@ function ti_reference(Hs, H0, coeffs, t)
     return A, U, dU, -im * A * U
 end
 
-function test_ti_step(::Type{OP}, Hs, H0, param_t; rng, hermitian=nothing) where OP
+function test_ti_step(::Type{OP}, Hs, H0, param_t; rng, hermitian=nothing, t0=0.7) where OP
     NH = length(Hs)
     NP = NH + param_t
-    t0 = 0.7
     step = TS.ConstMatrixStep{OP}(Hs; H0=H0, t=t0, param_t=param_t, hermitian=hermitian)
     @test TS.nparams(step) == NP
     @test TS.nparams(typeof(step)) == NP
@@ -480,6 +479,11 @@ end
             test_ti_step(OP, (), σz, param_t; rng)
             # Generic path forced on Hermitian input
             test_ti_step(OP, (σx / 2, σy / 2, σz / 2), H0, param_t; rng, hermitian=false)
+            # Small and large rotation angles (series and direct branches of the 2x2 closed form)
+            for t0 in (1e-4, 1e-2, 0.3, 5.0, 40.0)
+                test_ti_step(OP, (σx / 2, σy / 2, σz / 2), H0, param_t; rng, t0)
+                test_ti_step(OP, (σx / 2, σy / 2, σz / 2), H0, param_t; rng, t0, hermitian=false)
+            end
         end
         # Vector input for `Hs`
         step = TS.ConstMatrixStep{OP}([σx, σy])
@@ -510,15 +514,28 @@ end
         end
     end
 
-    @testset "General [$OP]" for OP in (Matrix{ComplexF64}, SMatrix{3,3,ComplexF64,9})
-        Hs = (randn(rng, ComplexF64, 3, 3), randn(rng, ComplexF64, 3, 3))
-        H0 = randn(rng, ComplexF64, 3, 3)
+    @testset "General [$OP]" for OP in (Matrix{ComplexF64}, SMatrix{3,3,ComplexF64,9},
+                                        SMatrix{2,2,ComplexF64,4}, MMatrix{2,2,ComplexF64,4})
+        n = size(OP <: Matrix ? zeros(3, 3) : OP(zeros(size(OP)...)), 1)
+        Hs = (randn(rng, ComplexF64, n, n), randn(rng, ComplexF64, n, n))
+        H0 = randn(rng, ComplexF64, n, n)
         for param_t in (false, true)
             test_ti_step(OP, Hs, nothing, param_t; rng)
             test_ti_step(OP, Hs, H0, param_t; rng)
             test_ti_step(OP, (), H0, param_t; rng)
             # Real non-symmetric generators
             test_ti_step(OP, (real(Hs[1]), real(Hs[2])), real(H0), param_t; rng)
+            for t0 in (1e-3, 5.0)
+                test_ti_step(OP, Hs, H0, param_t; rng, t0)
+            end
+        end
+    end
+    @testset "General 2x2 [Matrix]" begin
+        Hs = (randn(rng, ComplexF64, 2, 2), randn(rng, ComplexF64, 2, 2))
+        H0 = randn(rng, ComplexF64, 2, 2)
+        for param_t in (false, true), t0 in (1e-3, 0.7, 5.0)
+            test_ti_step(Matrix{ComplexF64}, Hs, H0, param_t; rng, t0)
+            test_ti_step(Matrix{ComplexF64}, (), H0, param_t; rng, t0)
         end
     end
 

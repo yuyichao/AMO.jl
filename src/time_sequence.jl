@@ -443,9 +443,133 @@ end
     return A
 end
 
+##### Closed form for 2x2 matrices
+#
+# With `s A = x0 I + x⃗·σ⃗` and `r² = x⃗·x⃗`,
+#     exp(s A) = e^x0 (f0 I + f1 x⃗·σ⃗),   f0 = cosh(r),  f1 = sinh(r) / r.
+# Since this is an exact analytic expression in the matrix entries, its derivative along
+# a direction `E = e0 I + e⃗·σ⃗` is the Fréchet derivative of the exponential:
+#     e^x0 [(e0 f0 + f1 x⃗·e⃗) I + (e0 f1 + f2 x⃗·e⃗) x⃗·σ⃗ + f1 e⃗·σ⃗],   f2 = (f0 - f1) / r².
+# For a Hermitian generator `r² = -t² |a⃗|²` and all the `f`'s are real trigonometric functions.
+
+# Taylor coefficients in r² of f0, f1 and f2
+const _EXPM2_F0 = Tuple(Float64(1 // factorial(big(2n))) for n in 0:7)
+const _EXPM2_F1 = Tuple(Float64(1 // factorial(big(2n + 1))) for n in 0:7)
+const _EXPM2_F2 = Tuple(Float64((2n + 2) // factorial(big(2n + 3))) for n in 0:7)
+
+@inline function _expm2_coefs_direct(r2::Real)
+    if r2 < 0
+        θ = sqrt(-r2)
+        sθ, cθ = sincos(θ)
+        f1 = sθ / θ
+        return cθ, f1, (cθ - f1) / r2
+    end
+    r = sqrt(r2)
+    f0 = cosh(r)
+    f1 = sinh(r) / r
+    return f0, f1, (f0 - f1) / r2
+end
+@inline function _expm2_coefs_direct(r2::Complex)
+    r = sqrt(r2)
+    f0 = cosh(r)
+    f1 = sinh(r) / r
+    return f0, f1, (f0 - f1) / r2
+end
+# f0, f1, f2 as (even) functions of r². The series avoids the cancellation in f2 near 0.
+@inline function _expm2_coefs(r2)
+    if abs(r2) < 0.25
+        return evalpoly(r2, _EXPM2_F0), evalpoly(r2, _EXPM2_F1), evalpoly(r2, _EXPM2_F2)
+    end
+    return _expm2_coefs_direct(r2)
+end
+
+# Pauli decomposition A = a0 I + ax σx + ay σy + az σz
+@inline function _pauli2(A, ::Val{true})
+    # Hermitian: real coefficients from the upper triangle
+    a11 = real(@inbounds A[1, 1])
+    a22 = real(@inbounds A[2, 2])
+    a12 = @inbounds A[1, 2]
+    return (a11 + a22) / 2, real(a12), -imag(a12), (a11 - a22) / 2
+end
+@inline function _pauli2(A, ::Val{false})
+    a11 = @inbounds A[1, 1]
+    a22 = @inbounds A[2, 2]
+    a12 = @inbounds A[1, 2]
+    a21 = @inbounds A[2, 1]
+    return (a11 + a22) / 2, (a12 + a21) / 2, Imaginary(-1 / 2) * (a21 - a12), (a11 - a22) / 2
+end
+# Entries (column major) of c0 I + cx σx + cy σy + cz σz
+@inline _pauli2_entries(c0, cx, cy, cz) =
+    (c0 + cz, cx + Imaginary(1) * cy, cx + _NEG_IM * cy, c0 - cz)
+
+# Entries of exp(s * A) for a 2x2 matrix `A`, and the quantities needed for the derivatives
+@inline function _expm2(A, s, ::Val{Herm}) where Herm
+    a0, ax, ay, az = _pauli2(A, Val(Herm))
+    s2 = s * s
+    r2 = s2 * (ax * ax + ay * ay + az * az)
+    f0, f1, f2 = _expm2_coefs(r2)
+    ex0 = exp(s * a0)
+    g = ex0 * (f1 * s)
+    U = _pauli2_entries(ex0 * f0, g * ax, g * ay, g * az)
+    return U, (ax, ay, az, s2, f0, f1, f2, ex0)
+end
+# Entries of the Fréchet derivative of exp(s * A) in the direction s * H
+@inline function _expm2_frechet(H, s, ::Val{Herm}, (ax, ay, az, s2, f0, f1, f2, ex0)) where Herm
+    h0, hx, hy, hz = _pauli2(H, Val(Herm))
+    xe = s2 * (ax * hx + ay * hy + az * hz)
+    e0 = s * h0
+    d0 = ex0 * (e0 * f0 + f1 * xe)
+    β = e0 * f1 + f2 * xe
+    γ = ex0 * s
+    return _pauli2_entries(d0, γ * (β * ax + f1 * hx), γ * (β * ay + f1 * hy),
+                           γ * (β * az + f1 * hz))
+end
+@inline function _set2!(M, (m11, m21, m12, m22))
+    @inbounds M[1, 1] = m11
+    @inbounds M[2, 1] = m21
+    @inbounds M[1, 2] = m12
+    @inbounds M[2, 2] = m22
+    return M
+end
+
+function _compute2(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, A, s, grad) where {OP,NParams,NH,PT,Herm}
+    U, parts = _expm2(A, s, Val(Herm))
+    Um = _to_op(OP, SMatrix{2,2}(U))
+    if !isempty(grad)
+        @assert length(grad) == NParams
+        Hs = step.Hs
+        for k in 1:NH
+            grad[k] = _to_op(OP, SMatrix{2,2}(_expm2_frechet(Hs[k], s, Val(Herm), parts)))
+        end
+        if NParams > NH
+            grad[NParams] = _to_op(OP, _NEG_IM .* (A * Um))
+        end
+    end
+    return Um
+end
+
+function _compute2!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, A, s, grad) where {OP,NParams,NH,PT,Herm}
+    U, parts = _expm2(A, s, Val(Herm))
+    _set2!(res, U)
+    if !isempty(grad)
+        @assert length(grad) == NParams
+        Hs = step.Hs
+        for k in 1:NH
+            _set2!(grad[k], _expm2_frechet(Hs[k], s, Val(Herm), parts))
+        end
+        if NParams > NH
+            mul!(grad[NParams], A, res, -im, false)
+        end
+    end
+    return res
+end
+
 function compute(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) where {OP,NParams,NH,PT,Herm}
     A = _assemble(step)
     s = Imaginary(-step.t)
+    if size(A) == (2, 2)
+        return _compute2(step, A, s, grad)
+    end
     λ, V, W = _eigen_decomp(A, Val(Herm))
     h = exp.((s / 2) .* λ)
     eλ = h .* h
@@ -498,6 +622,9 @@ function compute!(res::OP, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad) w
     end
     A = _assemble!(buf.A, step)
     s = Imaginary(-step.t)
+    if size(A) == (2, 2)
+        return _compute2!(res, step, A, s, grad)
+    end
     λ, V, W = _eigen_decomp(A, Val(Herm))
     h = buf.h
     eλ = buf.eλ
