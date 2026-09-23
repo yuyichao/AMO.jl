@@ -38,9 +38,29 @@ function set_params! end
 (nparams(::Type{T} where T<:AbstractStep{OP,NParams}) where {OP,NParams}) = NParams
 (nparams(::AbstractStep{OP,NParams}) where {OP,NParams}) = NParams
 
+"""
+    get_init(::Type{OP})
+    get_init(step::AbstractStep)
+
+Return a function that creates a new zero-initialized `OP` object, used by
+[`Sequence`](@ref) to populate its buffers, or `nothing` if none is available.
+`Sequence` uses `get_init(OP)` and falls back to the first non-`nothing`
+`get_init(step)` of its steps. An `init` is required when in-place multiplication
+(`mul!`) is used or when any of the steps supports in-place compute.
+"""
 get_init(T) = nothing
 get_mul(T) = *
 get_mul!(T) = nothing
+
+_first_init(::Tuple{}) = nothing
+function _first_init(steps::Tuple)
+    init = get_init(steps[1])
+    return init === nothing ? _first_init(Base.tail(steps)) : init
+end
+function _default_init(::Type{OP}, steps) where OP
+    init = get_init(OP)
+    return init === nothing ? _first_init(steps) : init
+end
 
 struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf} <: AbstractStep{OP,NParams}
     steps::Steps
@@ -54,7 +74,7 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
     mul::Mul
     mul!::Mul!
 
-    function Sequence{OP}(steps::Steps; init::Init=get_init(OP),
+    function Sequence{OP}(steps::Steps; init::Init=_default_init(OP, steps),
                           mul::Mul=get_mul(OP), mul!::(Mul!)=get_mul!(OP)) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Init,Mul,Mul!}
         @assert NSteps > 0
         if mul! !== nothing
@@ -95,6 +115,8 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
         return s
     end
 end
+
+get_init(s::Sequence) = s.init
 
 Base.@assume_effects :foldable function support_inplace_compute(::Type{<:Sequence{OP,NSteps,Steps,NParams,Init,Mul,Mul!}}) where {OP,NSteps,Steps,NParams,Init,Mul,Mul!}
     if NSteps == 1
