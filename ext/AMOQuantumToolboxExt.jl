@@ -8,7 +8,7 @@ using StaticArrays
 using ForwardDiff
 
 import AMO.TimeSequence: QobjEvoStep
-using AMO.TimeSequence: TimeSequence, _to_op
+using AMO.TimeSequence: TimeSequence, _to_op, _lrmul, _lmul
 using QuantumToolbox: AbstractQuantumObject, QuantumObjectEvolution, QobjEvo, Qobj,
     isoper, issuper, sesolve, qeye
 using SciMLOperators: AbstractSciMLOperator, AbstractSciMLScalarOperator, MatrixOperator,
@@ -80,38 +80,44 @@ end
 # (the union of the patterns of all terms), so that assembling the generator
 # `A(p, t) = H0 + Σᵢ cᵢ(p, t) Oᵢ` and its derivatives `∂ₖA = Σᵢ ∂ₖcᵢ Oᵢ` is a few
 # vector operations, evaluating each coefficient function once (with dual numbers).
-# The propagator uses a `MatrixOperator` with the pattern `P` whose values are updated
-# in-place. The sensitivity system
-#     d/dt [vec(U); vec(∂₁U); ...; vec(∂ₖU)]
-# uses the block lower triangular generator
-#     I ⊗ I ⊗ A + Σₖ |k⟩⟨0| ⊗ I ⊗ ∂ₖA
-# stored as a single sparse matrix with fixed structure, into which the values of
-# `A` and `∂ₖA` are scattered with precomputed index maps.
+# Four `MatrixOperator`s with in-place updates are built:
+#   H_fwd: A(p, t)                          the generator (n × n)
+#   H_rev: A(p, t0 + t1 - t)ᵀ               time-reversed and transposed, whose propagator
+#                                           over [t0, t1] is Uᵀ (so that L U = (Uᵀ Lᵀ)ᵀ);
+#                                           this holds for any generator, unitary or not
+#   G_fwd, G_rev: the block lower triangular sensitivity systems ((K+1)n)
+#       I ⊗ A + Σₖ |k⟩⟨0| ⊗ ∂ₖA
+#   acting on [ψ; ∂₁ψ; ...; ∂ₖψ] for a single state ψ, stored as sparse matrices with
+#   fixed structure into which the values of `A` and `∂ₖA` are scattered.
 
-struct _Terms{T,M,Λ<:NTuple{M,Tuple},PM}
-    λss::Λ                 # scalar operators of the time-dependent terms
+struct _Terms{T,PT,M,Λ<:NTuple{M,Tuple},PM}
+    λss::Λ                   # scalar operators of the time-dependent terms
     param_map::PM
-    H0nz::Vector{T}        # values of the constant term on `P`
+    H0nz::Vector{T}          # values of the constant term on `P`
     Onz::NTuple{M,Vector{T}} # values of the time-dependent terms on `P`
+    tsum::PT                 # t0 + t1
+    reverse::Bool            # evaluate the coefficients at `tsum - t`
 end
+@inline _time(terms::_Terms, t) = terms.reverse ? terms.tsum - t : t
 
-# In-place update of the (n × n) propagator generator
+# In-place update of the (n × n) generator
 struct _PropUpdate{TT<:_Terms}
     terms::TT
 end
 function (f::_PropUpdate)(A, u, p, t)
     terms = f.terms
     pm = terms.param_map(p)
+    te = _time(terms, t)
     nz = nonzeros(A)
     copyto!(nz, terms.H0nz)
     foreach(terms.λss, terms.Onz) do λs, Onz
-        c = _scalars_value(λs, pm, t)
+        c = _scalars_value(λs, pm, te)
         @. nz = muladd(c, Onz, nz)
     end
     return A
 end
 
-# In-place update of the augmented generator
+# In-place update of the sensitivity system
 struct _AugUpdate{TT<:_Terms,T,K}
     terms::TT
     Anz::Vector{T}
@@ -124,12 +130,13 @@ end
 function (f::_AugUpdate{TT,T,K})(M, u, p, t) where {TT,T,K}
     terms = f.terms
     pm = terms.param_map(_dual_params(p))
+    te = _time(terms, t)
     Anz = f.Anz
     Bnz = f.Bnz
     copyto!(Anz, terms.H0nz)
     foreach(b->fill!(b, zero(T)), Bnz)
     foreach(terms.λss, terms.Onz) do λs, Onz
-        c = _scalars_value(λs, pm, t)
+        c = _scalars_value(λs, pm, te)
         cv = _dual_value(c)
         @. Anz = muladd(cv, Onz, Anz)
         for k in 1:K
@@ -173,7 +180,30 @@ end
 _with_values(P::SparseMatrixCSC, vals::Vector) =
     SparseMatrixCSC(size(P, 1), size(P, 2), copy(P.colptr), copy(P.rowval), vals)
 
-function _build_operators(::Type{T}, ::Type{PT}, n, K, consts, tds, factor, param_map) where {T,PT}
+function _make_prop(P, terms::_Terms, constant::Bool)
+    A = _with_values(P, copy(terms.H0nz))
+    return QobjEvo(constant ? MatrixOperator(A) : MatrixOperator(A; update_func! = _PropUpdate(terms)))
+end
+
+function _make_aug(Mpat, ::Type{T}, nnzP, K, terms::_Terms, constant::Bool, destA, srcA, destB, srcB) where T
+    M = _with_values(Mpat, zeros(T, nnz(Mpat)))
+    aug = _AugUpdate(terms, zeros(T, nnzP), Tuple(zeros(T, nnzP) for _ in 1:K),
+                     destA, srcA, Tuple(destB), Tuple(srcB))
+    # Initialize with the constant part
+    _scatter!(M, aug, terms.H0nz, aug.Bnz)
+    return QobjEvo(constant ? MatrixOperator(M) : MatrixOperator(M; update_func! = aug))
+end
+
+function _build_operators(::Type{T}, ::Type{PT}, n, K, consts, tds, factor, param_map, tsum) where {T,PT}
+    H_fwd, G_fwd = _build_pair(T, PT, n, K, consts, tds, factor, param_map, tsum, false)
+    H_rev, G_rev = _build_pair(T, PT, n, K, [transpose(A) for A in consts],
+                               [(transpose(A), λs) for (A, λs) in tds], factor, param_map,
+                               tsum, true)
+    return H_fwd, H_rev, G_fwd, G_rev
+end
+
+function _build_pair(::Type{T}, ::Type{PT}, n, K, consts, tds, factor, param_map, tsum,
+                     reverse::Bool) where {T,PT}
     # Shared sparsity pattern
     P = spzeros(Bool, n, n)
     for A in consts
@@ -195,20 +225,14 @@ function _build_operators(::Type{T}, ::Type{PT}, n, K, consts, tds, factor, para
     end
     Onz = Tuple(factor .* _values_on(T, P, A) for (A, _) in tds)
     λss = Tuple(λs for (_, λs) in tds)
-    terms = _Terms(λss, param_map, H0nz, Onz)
+    constant = isempty(tds)
+    terms = _Terms(λss, param_map, H0nz, Onz, PT(tsum), reverse)
 
-    # Propagator generator
-    Aprop = _with_values(P, copy(H0nz))
-    H_prop = isempty(tds) ? MatrixOperator(Aprop) :
-        MatrixOperator(Aprop; update_func! = _PropUpdate(terms))
-
-    # Augmented generator
-    n2 = n^2
-    In = sparse(I, n, n)
-    Mpat = kron(sparse(I, K + 1, K + 1), kron(In, P))
+    # Sensitivity system structure and index maps
+    Mpat = kron(sparse(I, K + 1, K + 1), P)
     for k in 1:K
         Ek = sparse([k + 1], [1], [true], K + 1, K + 1)
-        Mpat = Mpat .| kron(Ek, kron(In, P))
+        Mpat = Mpat .| kron(Ek, P)
     end
     destA = Int[]
     srcA = Int[]
@@ -217,12 +241,9 @@ function _build_operators(::Type{T}, ::Type{PT}, n, K, consts, tds, factor, para
     rvM = rowvals(Mpat)
     for c in 1:size(Mpat, 2), q in nzrange(Mpat, c)
         r = rvM[q]
-        br, rr = divrem(r - 1, n2)
-        bc, cc = divrem(c - 1, n2)
-        ii, a = divrem(rr, n)
-        jj, b = divrem(cc, n)
-        @assert ii == jj
-        s = Pidx[a + 1, b + 1]
+        br, rr = divrem(r - 1, n)
+        bc, cc = divrem(c - 1, n)
+        s = Pidx[rr + 1, cc + 1]
         @assert s > 0
         if br == bc
             push!(destA, q)
@@ -233,13 +254,10 @@ function _build_operators(::Type{T}, ::Type{PT}, n, K, consts, tds, factor, para
             push!(srcB[br], s)
         end
     end
-    M = _with_values(Mpat, zeros(T, nnz(Mpat)))
-    aug = _AugUpdate(terms, zeros(T, nnzP), Tuple(zeros(T, nnzP) for _ in 1:K),
-                     destA, srcA, Tuple(destB), Tuple(srcB))
-    # Initialize with the constant part
-    _scatter!(M, aug, H0nz, aug.Bnz)
-    H_aug = isempty(tds) ? MatrixOperator(M) : MatrixOperator(M; update_func! = aug)
-    return QobjEvo(H_prop), QobjEvo(H_aug)
+
+    H = _make_prop(P, terms, constant)
+    G = _make_aug(Mpat, T, nnzP, K, terms, constant, destA, srcA, destB, srcB)
+    return H, G
 end
 
 ##### Construction
@@ -270,18 +288,15 @@ function QobjEvoStep{OP}(H::AbstractQuantumObject; nparams::Integer, tspan,
     consts = Any[]
     tds = Any[]
     _collect_terms!(consts, tds, Hevo.data, ())
-    H_prop, H_aug = _build_operators(T, PT, n, K, consts, tds, factor, param_map)
-
-    ψ0_prop = qeye(n)
-    ψ0 = zeros(T, (K + 1) * n^2)
-    ψ0[1:n^2] .= vec(Matrix{T}(I, n, n))
-    ψ0_aug = Qobj(ψ0)
-
     t0, t1 = tspan
+    H_fwd, H_rev, G_fwd, G_rev = _build_operators(T, PT, n, K, consts, tds, factor, param_map,
+                                                  t0 + t1)
+    ψ0_prop = qeye(n)
     kws = (; kwargs...)
-    return QobjEvoStep{OP,K,PT,typeof(H_prop),typeof(ψ0_prop),typeof(H_aug),typeof(ψ0_aug),
-                       typeof(kws)}(H_prop, ψ0_prop, H_aug, ψ0_aug, n, PT(t0), PT(t1), kws,
-                                    zero(SVector{K,PT}))
+    return QobjEvoStep{OP,K,T,PT,typeof(H_fwd),typeof(H_rev),typeof(G_fwd),typeof(G_rev),
+                       typeof(ψ0_prop),typeof(kws)}(
+        H_fwd, H_rev, G_fwd, G_rev, ψ0_prop, n, PT(t0), PT(t1), kws, zero(SVector{K,PT}),
+        Matrix{T}(undef, n, n), Vector{T}(undef, (K + 1) * n^2), false, false)
 end
 
 QobjEvoStep(H::AbstractQuantumObject; kwargs...) =
@@ -289,40 +304,212 @@ QobjEvoStep(H::AbstractQuantumObject; kwargs...) =
 
 ##### Evaluation
 
+_tlist(step::QobjEvoStep) = [step.t0, step.t1]
 _solve(step::QobjEvoStep, H, ψ0) =
-    sesolve(H, ψ0, [step.t0, step.t1]; params=step.params, progress_bar=Val(false),
+    sesolve(H, ψ0, _tlist(step); params=step.params, progress_bar=Val(false),
             step.kwargs...).states[end].data
+_solve_ket(step::QobjEvoStep, H, y0::AbstractVector) = _solve(step, H, Qobj(y0))
 
 @inline _block(y, n, k) = reshape(view(y, k * n^2 + 1:(k + 1) * n^2), n, n)
 
-function TimeSequence.compute(step::QobjEvoStep{OP,NParams}, grad) where {OP,NParams}
+# Propagate the columns of `X` (n × k or a vector) as states with `H` (n × n) or, with
+# gradients (`S !== nothing`, an array of `K` outputs of the shape of `out`), with the
+# sensitivity system `G`. For the reversed generator, this gives U† X and ∂(U†) X.
+function _propagate_columns!(out, S, step::QobjEvoStep{OP,K,T}, H, G, X) where {OP,K,T}
     n = step.n
-    if isempty(grad)
-        return _to_op(OP, _solve(step, step.H_prop, step.ψ0_prop))
+    if S === nothing
+        y0 = Vector{T}(undef, n)
+        for j in 1:size(X, 2)
+            copyto!(y0, view(X, :, j))
+            y = _solve_ket(step, H, y0)
+            copyto!(view(out, :, j), y)
+        end
+    else
+        y0 = zeros(T, (K + 1) * n)
+        for j in 1:size(X, 2)
+            copyto!(view(y0, 1:n), view(X, :, j))
+            y = _solve_ket(step, G, y0)
+            copyto!(view(out, :, j), view(y, 1:n))
+            @inbounds for k in 1:K
+                copyto!(view(S[k], :, j), view(y, k * n + 1:(k + 1) * n))
+            end
+        end
     end
-    @assert length(grad) == NParams
-    y = _solve(step, step.H_aug, step.ψ0_aug)
-    @inbounds for k in 1:NParams
-        grad[k] = _to_op(OP, _block(y, n, k))
-    end
-    return _to_op(OP, _block(y, n, 0))
+    return out
 end
 
-function TimeSequence.compute!(res::OP, step::QobjEvoStep{OP,NParams}, grad) where {OP,NParams}
+# U * R (and ∂ₖU * R into `S[k]`) by propagating the columns of `R`
+_right!(out, S, step::QobjEvoStep, R) =
+    _propagate_columns!(out, S, step, step.H_fwd, step.G_fwd, R)
+
+# L * U (and L * ∂ₖU into `D[k]`) from (Uᵀ Lᵀ)ᵀ by propagating the rows of `L` with the
+# reversed (transposed) generator
+function _left!(out, D, step::QobjEvoStep{OP,K,T}, L) where {OP,K,T}
+    n = step.n
+    m = size(L, 1)
+    Lt = Matrix{T}(undef, n, m)
+    for a in 1:m
+        Lt[:, a] .= view(L, a, :)
+    end
+    Y = Matrix{T}(undef, n, m)
+    DY = D === nothing ? nothing : [Matrix{T}(undef, n, m) for _ in 1:K]
+    _propagate_columns!(Y, DY, step, step.H_rev, step.G_rev, Lt)
+    transpose!(out, Y)
+    if D !== nothing
+        @inbounds for k in 1:K
+            transpose!(D[k], DY[k])
+        end
+    end
+    return out
+end
+
+# Full propagator and gradients (cached for the current parameters)
+function _propagator!(step::QobjEvoStep)
+    if !step.U_valid
+        if step.Y_valid
+            copyto!(step.U_cache, _block(step.Y_cache, step.n, 0))
+        else
+            copyto!(step.U_cache, _solve(step, step.H_fwd, step.ψ0_prop))
+        end
+        step.U_valid = true
+    end
+    return step.U_cache
+end
+function _sensitivities!(step::QobjEvoStep{OP,K,T}) where {OP,K,T}
+    if !step.Y_valid
+        n = step.n
+        Y = step.Y_cache
+        U = _block(Y, n, 0)
+        S = [_block(Y, n, k) for k in 1:K]
+        _right!(U, S, step, Matrix{T}(I, n, n))
+        step.Y_valid = true
+        copyto!(step.U_cache, U)
+        step.U_valid = true
+    end
+    return step.Y_cache
+end
+
+# Result types (the types of the products with the operator, see `compute`) and the
+# conversion of the computed dense arrays to them
+_right_type(::Type{OP}, R) where OP = Base.promote_op(*, OP, typeof(R))
+_left_type(::Type{OP}, L) where OP = Base.promote_op(*, typeof(L), OP)
+_as_type(::Type{RT}, x) where RT = convert(RT, x)
+_as_type(::Type{RT}, x::AbstractMatrix) where {RT<:Adjoint{<:Any,<:AbstractVector}} =
+    adjoint(convert(fieldtype(RT, :parent), conj.(vec(x))))
+_as_type(::Type{RT}, x::AbstractMatrix) where {RT<:Transpose{<:Any,<:AbstractVector}} =
+    transpose(convert(fieldtype(RT, :parent), vec(x)))
+
+# Dense buffer for U * R
+_right_buffer(::Type{T}, n, R::AbstractVector) where T = Vector{T}(undef, n)
+_right_buffer(::Type{T}, n, R) where T = Matrix{T}(undef, n, size(R, 2))
+
+function TimeSequence.compute(step::QobjEvoStep{OP,NParams,T}, grad, L, R) where {OP,NParams,T}
+    n = step.n
+    has_grad = !isempty(grad)
+    has_grad && @assert length(grad) == NParams
+    if R !== nothing
+        UR = _right_buffer(T, n, R)
+        S = has_grad ? [_right_buffer(T, n, R) for _ in 1:NParams] : nothing
+        _right!(UR, S, step, R)
+        if L === nothing
+            RT = _right_type(OP, R)
+            if has_grad
+                @inbounds for k in 1:NParams
+                    grad[k] = _as_type(RT, S[k])
+                end
+            end
+            return _as_type(RT, UR)
+        end
+        if has_grad
+            @inbounds for k in 1:NParams
+                grad[k] = L * S[k]
+            end
+        end
+        return L * UR
+    elseif L !== nothing
+        LU = Matrix{T}(undef, size(L, 1), n)
+        D = has_grad ? [Matrix{T}(undef, size(L, 1), n) for _ in 1:NParams] : nothing
+        _left!(LU, D, step, L)
+        LT = _left_type(OP, L)
+        if has_grad
+            @inbounds for k in 1:NParams
+                grad[k] = _as_type(LT, D[k])
+            end
+        end
+        return _as_type(LT, LU)
+    end
+    # Full operator (new objects, never aliasing the caches)
+    if !has_grad
+        return OP(_propagator!(step))
+    end
+    Y = _sensitivities!(step)
+    @inbounds for k in 1:NParams
+        grad[k] = OP(_block(Y, n, k))
+    end
+    return OP(_block(Y, n, 0))
+end
+TimeSequence.compute(step::QobjEvoStep, grad) = TimeSequence.compute(step, grad, nothing, nothing)
+
+function TimeSequence.compute!(res, step::QobjEvoStep{OP,NParams,T}, grad, L, R) where {OP,NParams,T}
+    n = step.n
+    has_grad = !isempty(grad)
+    has_grad && @assert length(grad) == NParams
+    if R !== nothing
+        if L === nothing
+            _right!(res, has_grad ? grad : nothing, step, R)
+            return res
+        end
+        UR = _right_buffer(T, n, R)
+        S = has_grad ? [_right_buffer(T, n, R) for _ in 1:NParams] : nothing
+        _right!(UR, S, step, R)
+        if has_grad
+            @inbounds for k in 1:NParams
+                mul!(grad[k], L, S[k])
+            end
+        end
+        mul!(res, L, UR)
+        return res
+    elseif L !== nothing
+        _left!(res, has_grad ? grad : nothing, step, L)
+        return res
+    end
+    if !has_grad
+        copyto!(res, _propagator!(step))
+        return res
+    end
+    Y = _sensitivities!(step)
+    @inbounds for k in 1:NParams
+        copyto!(grad[k], _block(Y, n, k))
+    end
+    copyto!(res, _block(Y, n, 0))
+    return res
+end
+function TimeSequence.compute!(res::OP, step::QobjEvoStep{OP}, grad) where OP
     if !ismutabletype(OP)
         throw(ArgumentError("In-place compute is not supported for immutable matrix type $OP"))
     end
+    return TimeSequence.compute!(res, step, grad, nothing, nothing)
+end
+
+# U * R with the gradients L * ∂ₖU * R, propagating only the columns of `R`
+function TimeSequence.compute_right(step::QobjEvoStep{OP,NParams,T}, grad, L, R, gradR) where {OP,NParams,T}
     n = step.n
-    if isempty(grad)
-        copyto!(res, _solve(step, step.H_prop, step.ψ0_prop))
-        return res
-    end
     @assert length(grad) == NParams
-    y = _solve(step, step.H_aug, step.ψ0_aug)
+    UR = _right_buffer(T, n, R)
+    S = [_right_buffer(T, n, R) for _ in 1:NParams]
+    _right!(UR, S, step, R)
     @inbounds for k in 1:NParams
-        copyto!(grad[k], _block(y, n, k))
+        grad[k] = L * S[k]
     end
-    copyto!(res, _block(y, n, 0))
+    return _as_type(_right_type(OP, R), UR)
+end
+function TimeSequence.compute_right!(res, step::QobjEvoStep{OP,NParams}, grad, L, R, gradR) where {OP,NParams}
+    @assert length(grad) == NParams
+    S = @view gradR[1:NParams]
+    _right!(res, S, step, R)
+    @inbounds for k in 1:NParams
+        mul!(grad[k], L, S[k])
+    end
     return res
 end
 

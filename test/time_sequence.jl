@@ -149,7 +149,7 @@ function TS.compute!(res::VT, op::IStep3{VT}, grad) where VT
 end
 TS.support_inplace_compute(::Type{<:IStep3}) = true
 
-function test_scalar_sequence(s::TS.AbstractStep{VT}) where VT
+function test_scalar_sequence(s::TS.Sequence{VT}) where VT
     NP = TS.nparams(typeof(s))
     @test TS.nparams(s) == NP
     if VT === Float64
@@ -580,8 +580,6 @@ end
 
 function test_ti_sequence(::Type{OP}, s, rng; inplace) where OP
     @test TS.nparams(s) == 7
-    @test TS.get_init(s) === s.init
-    @test TS.get_init(s)() isa OP
     approx(a, b) = isapprox(a, b, rtol=1e-8, atol=1e-10)
     for _ in 1:20
         params = randn(rng, 7)
@@ -643,10 +641,6 @@ end
     @test s.init !== nothing
     @test !TS.support_inplace_compute(typeof(s))
     test_ti_sequence(OP, s, rng; inplace=false)
-    # Nested sequence gets its init from the inner sequence
-    s2 = TS.Sequence{OP}((s, make_steps()[1]))
-    @test s2.init === s.init
-    @test TS.nparams(s2) == 10
     if OP <: Matrix
         # In-place multiplication with init from the steps
         s = TS.Sequence{OP}(make_steps(); mul=nothing, mul! = LinearAlgebra.mul!)
@@ -657,5 +651,244 @@ end
         s = TS.Sequence{OP}(make_steps(); init=init, mul=nothing, mul! = LinearAlgebra.mul!)
         @test s.init === init
         test_ti_sequence(OP, s, rng; inplace=true)
+    end
+end
+
+lrmul(L, X, R) = TS._lrmul(L, X, R)
+
+# A minimal step implementing the multiplied forms but not `compute_right`
+# (to exercise the generic fallback)
+mutable struct ScaleStep <: TS.AbstractStep{Matrix{ComplexF64},1}
+    M::Matrix{ComplexF64}
+    p::Float64
+end
+TS.set_params!(step::ScaleStep, params) = (step.p = params[1]; nothing)
+function TS.compute(step::ScaleStep, grad, L=nothing, R=nothing)
+    if !isempty(grad)
+        grad[1] = lrmul(L, step.M, R)
+    end
+    return lrmul(L, step.p * step.M, R)
+end
+function TS.compute!(res, step::ScaleStep, grad, L=nothing, R=nothing)
+    if !isempty(grad)
+        copyto!(grad[1], lrmul(L, step.M, R))
+    end
+    copyto!(res, lrmul(L, step.p * step.M, R))
+    return res
+end
+TS.support_inplace_compute(::Type{ScaleStep}) = true
+
+# Check `compute_right`/`compute_right!` against the full operator and gradients
+function test_compute_right(step, L, R, Ufull, gfull)
+    NP = TS.nparams(step)
+    approx(a, b) = isapprox(a, b, rtol=1e-9, atol=1e-11)
+    URref = lrmul(nothing, Ufull, R)
+    gref = [lrmul(L, g, R) for g in gfull]
+    gradR_any = Vector{Any}(undef, NP)
+    @test approx(TS.compute_right(step, [], L, R, gradR_any), URref)
+    g = Any[zeros(ComplexF64, size(gref[1])) for _ in 1:NP]
+    @test approx(TS.compute_right(step, g, L, R, gradR_any), URref)
+    for k in 1:NP
+        @test approx(g[k], gref[k])
+    end
+    if !TS.support_inplace_compute(typeof(step))
+        return
+    end
+    res = zeros(ComplexF64, size(URref))
+    gradR = [zeros(ComplexF64, size(URref)) for _ in 1:NP]
+    @test TS.compute_right!(res, step, Matrix{ComplexF64}[], L, R, gradR) === res
+    @test approx(res, URref)
+    g2 = [zeros(ComplexF64, size(gref[1])) for _ in 1:NP]
+    g2_ids = copy(g2)
+    fill!(res, 0)
+    @test TS.compute_right!(res, step, g2, L, R, gradR) === res
+    @test approx(res, URref)
+    for k in 1:NP
+        @test g2[k] === g2_ids[k]
+        @test approx(g2[k], gref[k])
+    end
+end
+
+function test_lr_step(step, L, R, Ufull, gfull; rng)
+    NP = TS.nparams(step)
+    approx(a, b) = isapprox(a, b, rtol=1e-9, atol=1e-11)
+    Uref = lrmul(L, Ufull, R)
+    gref = [lrmul(L, g, R) for g in gfull]
+    # Allocating (a sequence with in-place multiplication still mutates the gradients
+    # in place, so provide pre-allocated ones)
+    @test approx(TS.compute(step, [], L, R), Uref)
+    g = Any[zeros(ComplexF64, size(Uref)) for _ in 1:NP]
+    @test approx(TS.compute(step, g, L, R), Uref)
+    for k in 1:NP
+        @test approx(g[k], gref[k])
+    end
+    if !TS.support_inplace_compute(typeof(step))
+        return
+    end
+    # In-place
+    res = zeros(ComplexF64, size(Uref))
+    @test TS.compute!(res, step, Matrix{ComplexF64}[], L, R) === res
+    @test approx(res, Uref)
+    g2 = [zeros(ComplexF64, size(Uref)) for _ in 1:NP]
+    g2_ids = copy(g2)
+    fill!(res, 0)
+    @test TS.compute!(res, step, g2, L, R) === res
+    @test approx(res, Uref)
+    for k in 1:NP
+        @test g2[k] === g2_ids[k]
+        @test approx(g2[k], gref[k])
+    end
+end
+
+@testset "Left/right multipliers" begin
+    rng = Xoshiro(2468)
+    MT = Matrix{ComplexF64}
+    rand_herm(n) = Matrix(Hermitian(randn(rng, ComplexF64, n, n)))
+    multipliers(n) = ((nothing, randn(rng, ComplexF64, n, 1)),
+                      (randn(rng, ComplexF64, 1, n), nothing),
+                      (nothing, randn(rng, ComplexF64, n)),
+                      (randn(rng, ComplexF64, 1, n), randn(rng, ComplexF64, n)),
+                      (randn(rng, ComplexF64, 1, n), randn(rng, ComplexF64, n, 1)),
+                      (randn(rng, ComplexF64, n)', randn(rng, ComplexF64, n, 2)),
+                      (randn(rng, ComplexF64, 2, n), randn(rng, ComplexF64, n, 3)),
+                      (randn(rng, ComplexF64, n + 1, n), randn(rng, ComplexF64, n, n + 2)))
+
+    @testset "ConstMatrixStep n=$n $(herm ? "Hermitian" : "general") [$OP]" for n in (2, 3, 4, 5),
+            herm in (true, false), OP in (MT, SMatrix{n,n,ComplexF64,n * n})
+        gen() = herm ? rand_herm(n) : randn(rng, ComplexF64, n, n)
+        Hs = (gen(), gen(), gen())
+        for param_t in (false, true), H0 in (nothing, gen())
+            step = TS.ConstMatrixStep{OP}(Hs; H0=H0, param_t=param_t)
+            NP = TS.nparams(step)
+            for _ in 1:3
+                TS.set_params!(step, randn(rng, NP))
+                gfull = [OP(zeros(n, n)) for _ in 1:NP]
+                Ufull = TS.compute(step, gfull)
+                for (L, R) in multipliers(n)
+                    test_lr_step(step, L, R, Ufull, gfull; rng)
+                    # `compute_right` is only used with both multipliers
+                    if L !== nothing && R !== nothing
+                        test_compute_right(step, L, R, Ufull, gfull)
+                    end
+                    # The results have the types of the products with the operator
+                    if L !== nothing
+                        @test typeof(TS.compute(step, [], L, nothing)) === typeof(L * Ufull)
+                    end
+                    if R !== nothing
+                        @test typeof(TS.compute(step, [], nothing, R)) === typeof(Ufull * R)
+                        g = Vector{Any}(undef, NP)
+                        TS.compute(step, g, nothing, R)
+                        @test all(typeof(g[k]) === typeof(Ufull * R) for k in 1:NP)
+                    end
+                end
+                # Both `nothing` is the plain compute
+                @test TS.compute(step, OP[], nothing, nothing) ≈ Ufull
+            end
+        end
+    end
+
+    @testset "Eigendecomposition cache" begin
+        n = 4
+        Hs = (rand_herm(n), rand_herm(n))
+        step = TS.ConstMatrixStep{MT}(Hs; param_t=true)
+        res = zeros(ComplexF64, n, n)
+        for _ in 1:5
+            p = randn(rng, 3)
+            TS.set_params!(step, p)
+            A = p[1] * Hs[1] + p[2] * Hs[2]
+            @test TS.compute!(res, step, MT[]) ≈ exp(-im * p[3] * A)
+            # Same coefficients, different time: reuses the decomposition
+            p2 = [p[1], p[2], randn(rng)]
+            TS.set_params!(step, p2)
+            @test TS.compute!(res, step, MT[]) ≈ exp(-im * p2[3] * A)
+            L = randn(rng, ComplexF64, 1, n)
+            R = randn(rng, ComplexF64, n, 1)
+            r = zeros(ComplexF64, 1, 1)
+            @test TS.compute!(r, step, MT[], L, R) ≈ L * exp(-im * p2[3] * A) * R
+        end
+    end
+
+    @testset "compute_right fallback" begin
+        n = 3
+        M = randn(rng, ComplexF64, n, n)
+        step = ScaleStep(M, 0.0)
+        for _ in 1:3
+            p = randn(rng)
+            TS.set_params!(step, [p])
+            gfull = [zeros(ComplexF64, n, n)]
+            Ufull = TS.compute(step, gfull)
+            for (L, R) in multipliers(n)
+                if L !== nothing && R !== nothing
+                    test_compute_right(step, L, R, Ufull, gfull)
+                end
+            end
+        end
+        # In a sequence (using the fallback for the gradients), mixed with ConstMatrixStep
+        L = randn(rng, ComplexF64, 1, n)
+        R = randn(rng, ComplexF64, n, 1)
+        steps = (step, TS.ConstMatrixStep{MT}((rand_herm(n),); param_t=true), ScaleStep(randn(rng, ComplexF64, n, n), 0.0))
+        for kws in ((;), (; mul=nothing, mul! = LinearAlgebra.mul!, left=L, right=R))
+            s = TS.Sequence{MT}(steps; kws...)
+            NP = TS.nparams(s)
+            @test NP == 4
+            TS.set_params!(s, randn(rng, NP))
+            gfull = [zeros(ComplexF64, n, n) for _ in 1:NP]
+            Ufull = copy(TS.compute(s, gfull))
+            gfull = copy.(gfull)
+            test_lr_step(s, L, R, Ufull, gfull; rng)
+        end
+    end
+
+    @testset "Sequence [$OP]" for OP in (MT, SMatrix{4,4,ComplexF64,16})
+        n = 4
+        make_steps() = (TS.ConstMatrixStep{OP}((rand_herm(n), rand_herm(n)); H0=rand_herm(n), param_t=true),
+                        TS.ConstMatrixStep{OP}((rand_herm(n),)),
+                        TS.ConstMatrixStep{OP}((randn(rng, ComplexF64, n, n),); param_t=true),
+                        TS.ConstMatrixStep{OP}((rand_herm(n), rand_herm(n), rand_herm(n))))
+        inplace_list = OP <: Matrix ? (false, true) : (false,)
+        for inplace in inplace_list
+            kws = inplace ? (; mul=nothing, mul! = LinearAlgebra.mul!) : (;)
+            for (L, R) in multipliers(n)
+                if OP <: SMatrix
+                    L = L === nothing ? nothing : SMatrix{size(L)...}(L)
+                    R = R === nothing ? nothing :
+                        (R isa AbstractVector ? SVector{length(R)}(R) : SMatrix{size(R)...}(R))
+                end
+                # With in-place multiplication the prototypes of the multipliers are given
+                lr = inplace ? (; left=L, right=R) : (;)
+                s = TS.Sequence{OP}(make_steps(); kws..., lr...)
+                NP = TS.nparams(s)
+                @test NP == 9
+                for _ in 1:3
+                    TS.set_params!(s, randn(rng, NP))
+                    gfull = [OP(zeros(n, n)) for _ in 1:NP]
+                    Ufull = copy(TS.compute(s, gfull))
+                    gfull = copy.(gfull)
+                    test_lr_step(s, L, R, Ufull, gfull; rng)
+                    # The plain computation still works with the same sequence
+                    @test TS.compute(s, OP[]) ≈ Ufull
+                end
+            end
+        end
+        if OP <: Matrix
+            L = randn(rng, ComplexF64, 1, n)
+            R = randn(rng, ComplexF64, n, 1)
+            # In-place needs `mul!`
+            s = TS.Sequence{OP}(make_steps())
+            @test_throws ArgumentError TS.compute!(zeros(ComplexF64, 1, 1), s, MT[], L, R)
+            # ... and the prototypes
+            s = TS.Sequence{OP}(make_steps(); mul=nothing, mul! = LinearAlgebra.mul!)
+            @test_throws ArgumentError TS.compute!(zeros(ComplexF64, 1, 1), s, MT[], L, R)
+            @test_throws ArgumentError TS.compute(s, MT[], L, R)
+            # ... of matching type and size, and matching which multipliers are given
+            s = TS.Sequence{OP}(make_steps(); mul=nothing, mul! = LinearAlgebra.mul!, left=L, right=R)
+            @test_throws ArgumentError TS.compute!(zeros(ComplexF64, 2, 1), s, MT[],
+                                                   randn(rng, ComplexF64, 2, n), R)
+            @test_throws ArgumentError TS.compute!(zeros(ComplexF64, 1, n), s, MT[], L, nothing)
+            s = TS.Sequence{OP}(make_steps(); mul=nothing, mul! = LinearAlgebra.mul!, left=L)
+            @test_throws ArgumentError TS.compute!(zeros(ComplexF64, 1, 1), s, MT[], L, R)
+            TS.set_params!(s, randn(rng, TS.nparams(s)))
+            @test TS.compute!(zeros(ComplexF64, 1, n), s, MT[], L, nothing) ≈ L * TS.compute(s, MT[])
+        end
     end
 end

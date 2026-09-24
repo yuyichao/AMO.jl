@@ -214,3 +214,104 @@ end
     @test_throws AssertionError TS.compute!(zeros(ComplexF64, 2, 2), step,
                                             [zeros(ComplexF64, 2, 2) for _ in 1:2])
 end
+
+@testset "QobjEvoStep left/right multipliers" begin
+    rng = Xoshiro(4242)
+    H = QobjEvo((σz / 2, (σx / 2, (p, t)->p[1] * cos(p[2] * t)), (σy / 2, (p, t)->p[3])))
+    T = 1.5
+    n = 2
+    step = TS.QobjEvoStep{MT}(H; nparams=3, tspan=(0, T), tols...)
+    approx(a, b) = isapprox(a, b, rtol=1e-8, atol=1e-10)
+    for _ in 1:3
+        p = randn(rng, 3)
+        TS.set_params!(step, p)
+        gfull = [zeros(ComplexF64, n, n) for _ in 1:3]
+        Ufull = TS.compute(step, gfull)
+        for (L, R) in ((nothing, randn(rng, ComplexF64, n, 1)), (randn(rng, ComplexF64, 1, n), nothing),
+                       (randn(rng, ComplexF64, 1, n), randn(rng, ComplexF64, n, 1)),
+                       (randn(rng, ComplexF64, 3, n), randn(rng, ComplexF64, n)))
+            Uref = TS._lrmul(L, Ufull, R)
+            gref = [TS._lrmul(L, g, R) for g in gfull]
+            @test approx(TS.compute(step, [], L, R), Uref)
+            g = Any[zeros(ComplexF64, size(Uref)) for _ in 1:3]
+            @test approx(TS.compute(step, g, L, R), Uref)
+            @test all(approx(g[k], gref[k]) for k in 1:3)
+            res = zeros(ComplexF64, size(Uref))
+            g2 = [zeros(ComplexF64, size(Uref)) for _ in 1:3]
+            @test TS.compute!(res, step, g2, L, R) === res
+            @test approx(res, Uref)
+            @test all(approx(g2[k], gref[k]) for k in 1:3)
+        end
+        # `compute_right` (generic fallback): U * R and L * ∂U * R
+        L = randn(rng, ComplexF64, 1, n)
+        R = randn(rng, ComplexF64, n, 1)
+        g = Any[zeros(ComplexF64, 1, 1) for _ in 1:3]
+        @test approx(TS.compute_right(step, g, L, R, Vector{Matrix{ComplexF64}}(undef, 3)), Ufull * R)
+        @test all(approx(g[k], L * gfull[k] * R) for k in 1:3)
+        res = zeros(ComplexF64, n, 1)
+        g2 = [zeros(ComplexF64, 1, 1) for _ in 1:3]
+        gradR = [zeros(ComplexF64, n, 1) for _ in 1:3]
+        @test TS.compute_right!(res, step, g2, L, R, gradR) === res
+        @test approx(res, Ufull * R)
+        @test all(approx(g2[k], L * gfull[k] * R) for k in 1:3)
+        # Results do not alias the caches
+        U1 = TS.compute(step, MT[])
+        U1[1, 1] = 0
+        @test approx(TS.compute(step, MT[]), Ufull)
+    end
+
+    # The types of the results are those of the products with the operator
+    TS.set_params!(step, randn(rng, 3))
+    Ufull = TS.compute(step, MT[])
+    for (L, R) in ((randn(rng, ComplexF64, n)', nothing), (randn(rng, ComplexF64, 2, n), nothing),
+                   (nothing, randn(rng, ComplexF64, n)), (nothing, randn(rng, ComplexF64, n, 2)),
+                   (randn(rng, ComplexF64, n)', randn(rng, ComplexF64, n)))
+        r = TS.compute(step, [], L, R)
+        @test typeof(r) === typeof(TS._lrmul(L, Ufull, R))
+        @test approx(r, TS._lrmul(L, Ufull, R))
+    end
+
+    # Liouvillian with multipliers (reversed propagation of a non-Hermitian generator)
+    c_ops = [sqrt(0.3) * sigmam()]
+    Lv = liouvillian(H, c_ops)
+    stepL = TS.QobjEvoStep{MT}(Lv; nparams=3, tspan=(0, T), tols...)
+    p = randn(rng, 3)
+    TS.set_params!(stepL, p)
+    gfull = [zeros(ComplexF64, 4, 4) for _ in 1:3]
+    ULfull = TS.compute(stepL, gfull)
+    for (L, R) in ((randn(rng, ComplexF64, 1, 4), nothing), (nothing, randn(rng, ComplexF64, 4, 1)),
+                   (randn(rng, ComplexF64, 2, 4), randn(rng, ComplexF64, 4, 1)))
+        g = Any[zeros(ComplexF64, size(TS._lrmul(L, ULfull, R))) for _ in 1:3]
+        @test approx(TS.compute(stepL, g, L, R), TS._lrmul(L, ULfull, R))
+        @test all(approx(g[k], TS._lrmul(L, gfull[k], R)) for k in 1:3)
+    end
+
+    # Cache invalidation: the second parameter set gives different results
+    p1 = randn(rng, 3)
+    p2 = randn(rng, 3)
+    TS.set_params!(step, p1)
+    U1 = TS.compute(step, MT[])
+    TS.set_params!(step, p2)
+    U2 = TS.compute(step, MT[])
+    @test !approx(U1, U2)
+    TS.set_params!(step, p1)
+    @test approx(TS.compute(step, MT[]), U1)
+
+    # In a Sequence with multipliers (in-place, with prototypes), mixed with ConstMatrixStep
+    L = randn(rng, ComplexF64, 1, n)
+    R = randn(rng, ComplexF64, n, 1)
+    step2 = TS.ConstMatrixStep{MT}((Matrix(σx.data), Matrix(σz.data)); param_t=true)
+    s = TS.Sequence{MT}((step, step2, step); mul=nothing, mul! = LinearAlgebra.mul!, left=L, right=R)
+    NP = TS.nparams(s)
+    @test NP == 9
+    ps = randn(rng, NP)
+    TS.set_params!(s, ps)
+    gfull = [zeros(ComplexF64, n, n) for _ in 1:NP]
+    Ufull = copy(TS.compute(s, gfull))
+    gfull = copy.(gfull)
+    r = zeros(ComplexF64, 1, 1)
+    g = [zeros(ComplexF64, 1, 1) for _ in 1:NP]
+    TS.compute!(r, s, g, L, R)
+    @test approx(r, L * Ufull * R)
+    @test all(approx(g[k], L * gfull[k] * R) for k in 1:NP)
+end
