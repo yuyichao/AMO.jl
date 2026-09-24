@@ -1289,17 +1289,17 @@ For an `Operator` (a Hamiltonian ``H``), the operator of the step is the propaga
 ``U = T\\exp(-i∫H dt)``. For a `SuperOperator` (a Liouvillian ``L``), it is
 ``T\\exp(∫L dt)`` acting on the vectorized (column stacking) density matrix.
 
-The propagator is computed with `QuantumToolbox.sesolve` using the identity operator as
-the initial state. The gradient WRT the parameters is computed by solving the sensitivity
-equations ``∂_t (∂_k U) = -i (H ∂_k U + (∂_k H) U)`` with `sesolve`, where ``∂_k H`` is
-obtained by forward-mode automatic differentiation of the coefficient functions.
-With left/right multipliers, only the multipliers are propagated: the columns of `R`
-(and their sensitivities) as states, and the rows of `L` as states of the time-reversed
-transposed generator (whose propagator is ``U^T``), so that the cost scales with the number of rows
-and columns of the multipliers instead of the dimension. The accuracy of both the
-operator and its gradient are therefore determined by the ODE solver options,
-which can be passed as keyword arguments (e.g. `alg`, `reltol`, `abstol`) and are
-forwarded to `sesolve`.
+The propagator and the sensitivity equations ``∂_t (∂_k U) = -i (H ∂_k U + (∂_k H) U)``
+(where ``∂_k H`` is obtained by forward-mode automatic differentiation of the coefficient
+functions) are integrated column by column with ODE integrators that are initialized once
+at construction and reused. With left/right multipliers, only the multipliers are
+propagated: the columns of `R` (and their sensitivities) as states, and the rows of `L`
+as states of the time-reversed transposed generator (whose propagator is ``U^T``), so that
+the cost scales with the number of rows and columns of the multipliers instead of the
+dimension. The accuracy of both the operator and its gradient are therefore determined by
+the ODE solver options, which can be passed as keyword arguments (`alg`, default
+`Vern7(lazy=false)` as for `QuantumToolbox.sesolve`, and e.g. `reltol`, `abstol`,
+forwarded to the integrator).
 
 `OP` is the matrix type of the result (e.g. `Matrix{ComplexF64}` or
 `SMatrix{2,2,ComplexF64,4}`) and defaults to a dense `Matrix` with the complex element
@@ -1308,16 +1308,16 @@ can be constructed without an explicit `init`. Left/right multipliers (`nothing`
 arrays, like for [`ConstMatrixStep`](@ref)) are applied to the full operator and
 gradients.
 """
-mutable struct QobjEvoStep{OP<:AbstractMatrix,NParams,T,PT,HF,HR,GF,GR,SP,KW} <: AbstractStep{OP,NParams}
-    const H_fwd::HF   # generator (n × n)
+mutable struct QobjEvoStep{OP<:AbstractMatrix,NParams,T,PT,HF,HR,GF,GR,KW,QB} <: AbstractStep{OP,NParams}
+    const H_fwd::HF   # ODE generator -im * H (n × n)
     const H_rev::HR   # time-reversed and transposed generator, whose propagator is Uᵀ
     const G_fwd::GF   # sensitivity system ((K+1)n) for a state and its gradients
     const G_rev::GR   # the same for the reversed generator
-    const ψ0_prop::SP # identity operator, initial state for the full propagator
     const n::Int      # size of the operator
     const t0::PT
     const t1::PT
-    const kwargs::KW  # forwarded to the solver
+    const kwargs::KW  # solver options
+    const buf::QB     # ODE integrators and work buffers (see the extension)
     params::SVector{NParams,PT}
     # Cached full propagator and full gradients ([vec(U); vec(∂₁U); ...]) for the current
     # parameters (the multiplied forms propagate only the multipliers and are not cached)
