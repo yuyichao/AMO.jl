@@ -783,6 +783,70 @@ function test_compute_right(step, L, R, Ufull, gfull)
     end
 end
 
+# Check `compute_left`/`compute_left!` against the full operator and gradients
+function test_compute_left(step, L, R, Ufull, gfull)
+    NP = TS.nparams(step)
+    approx(a, b) = isapprox(a, b, rtol=1e-9, atol=1e-11)
+    LUref = lrmul(L, Ufull, nothing)
+    gref = [lrmul(L, g, R) for g in gfull]
+    gradL_any = Vector{Any}(undef, NP)
+    @test approx(TS.compute_left(step, [], L, R, gradL_any), LUref)
+    g = Any[zeros(ComplexF64, size(gref[1])) for _ in 1:NP]
+    @test approx(TS.compute_left(step, g, L, R, gradL_any), LUref)
+    for k in 1:NP
+        @test approx(g[k], gref[k])
+    end
+    if !TS.support_inplace_compute(typeof(step))
+        return
+    end
+    res = zeros(ComplexF64, size(LUref))
+    gradL = [zeros(ComplexF64, size(LUref)) for _ in 1:NP]
+    g2 = [zeros(ComplexF64, size(gref[1])) for _ in 1:NP]
+    g2_ids = copy(g2)
+    @test TS.compute_left!(res, step, g2, L, R, gradL) === res
+    @test approx(res, LUref)
+    for k in 1:NP
+        @test g2[k] === g2_ids[k]
+        @test approx(g2[k], gref[k])
+    end
+end
+
+# Check `propagate!`/`pullback!` of a sequence constructed with the prototypes `L` and `R`
+function test_vjp(s, L, R, Ufull, gfull)
+    NP = TS.nparams(s)
+    approx(a, b) = isapprox(a, b, rtol=1e-9, atol=1e-11)
+    inplace = s.mul! !== nothing
+    URref = Ufull * R
+    LUref = L * Ufull
+    gref = [L * g * R for g in gfull]
+    for _ in 1:2
+        R2 = copy(R)
+        @test approx(TS.propagate!(s, R2), URref)
+        if !isbits(R2)
+            # The right multiplier is copied
+            fill!(R2, 0)
+        end
+        @test approx(TS.pullback!(s, [], L), LUref)
+        if inplace
+            g = [zeros(ComplexF64, size(gref[1])) for _ in 1:NP]
+            g_ids = copy(g)
+        else
+            g = Vector{Any}(undef, NP)
+        end
+        @test approx(TS.pullback!(s, g, L), LUref)
+        for k in 1:NP
+            inplace && @test g[k] === g_ids[k]
+            @test approx(g[k], gref[k])
+        end
+    end
+    # Multipliers of the wrong type or size
+    @test_throws ArgumentError TS.propagate!(s, ComplexF32.(R))
+    @test_throws ArgumentError TS.pullback!(s, [], ComplexF32.(L))
+    if R isa Matrix
+        @test_throws ArgumentError TS.propagate!(s, [R R])
+    end
+end
+
 function test_lr_step(step, L, R, Ufull, gfull; rng)
     NP = TS.nparams(step)
     approx(a, b) = isapprox(a, b, rtol=1e-9, atol=1e-11)
@@ -843,6 +907,7 @@ end
                     # `compute_right` is only used with both multipliers
                     if L !== nothing && R !== nothing
                         test_compute_right(step, L, R, Ufull, gfull)
+                        test_compute_left(step, L, R, Ufull, gfull)
                     end
                     # The results have the types of the products with the operator
                     if L !== nothing
@@ -894,6 +959,7 @@ end
             for (L, R) in multipliers(n)
                 if L !== nothing && R !== nothing
                     test_compute_right(step, L, R, Ufull, gfull)
+                    test_compute_left(step, L, R, Ufull, gfull)
                 end
             end
         end
@@ -910,6 +976,12 @@ end
             Ufull = copy(TS.compute(s, gfull))
             gfull = copy.(gfull)
             test_lr_step(s, L, R, Ufull, gfull; rng)
+            # Reverse mode (using the `compute_left` fallback)
+            s = TS.Sequence{MT}(steps; merge(kws, (; left=L, right=R))...)
+            TS.set_params!(s, randn(rng, NP))
+            Ufull = copy(TS.compute(s, gfull))
+            gfull = copy.(gfull)
+            test_vjp(s, L, R, Ufull, gfull)
         end
     end
 
@@ -941,6 +1013,14 @@ end
                     test_lr_step(s, L, R, Ufull, gfull; rng)
                     # The plain computation still works with the same sequence
                     @test TS.compute(s, OP[]) ≈ Ufull
+                end
+                if L !== nothing && R !== nothing
+                    s = TS.Sequence{OP}(make_steps(); kws..., left=L, right=R)
+                    TS.set_params!(s, randn(rng, NP))
+                    gfull = [OP(zeros(n, n)) for _ in 1:NP]
+                    Ufull = copy(TS.compute(s, gfull))
+                    gfull = copy.(gfull)
+                    test_vjp(s, L, R, Ufull, gfull)
                 end
             end
         end
@@ -1030,13 +1110,27 @@ end
                         R = R === nothing ? nothing :
                             (R isa AbstractVector ? SVector{length(R)}(R) : SMatrix{size(R)...}(R))
                     end
-                    if !inplace && L === nothing && R === nothing
-                        continue
+                    # Allocating multiplication may also use the prototypes
+                    for lr in (inplace ? ((; left=L, right=R),) : ((;), (; left=L, right=R)))
+                        if !inplace && L === nothing && R === nothing
+                            continue
+                        end
+                        sl = TS.Sequence{OP}(layout; kws..., lr...)
+                        test_lr_step(sl, L, R, Ufull, gfull; rng)
+                        if L !== nothing && R !== nothing && haskey(lr, :left)
+                            test_vjp(sl, L, R, Ufull, gfull)
+                        end
                     end
-                    lr = inplace ? (; left=L, right=R) : (;)
-                    sl = TS.Sequence{OP}(layout; kws..., lr...)
-                    test_lr_step(sl, L, R, Ufull, gfull; rng)
                 end
+                # Reverse mode requires both prototypes
+                L = randn(rng, ComplexF64, 1, n)
+                R = randn(rng, ComplexF64, n)
+                if OP <: SMatrix
+                    L = SMatrix{1,n}(L)
+                    R = SVector{n}(R)
+                end
+                @test_throws ArgumentError TS.propagate!(TS.Sequence{OP}(layout; kws..., left=L), R)
+                @test_throws ArgumentError TS.pullback!(TS.Sequence{OP}(layout; kws..., right=R), [], L)
             end
         end
     end

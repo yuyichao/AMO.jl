@@ -8,8 +8,9 @@ using StaticArrays
 
 using ..Math: Imaginary, HermEigenWorkspace, heevd!
 
-public AbstractStep, support_inplace_compute, compute, compute!, compute_right, compute_right!, set_params!,
-    get_init, get_mul, get_mul!, Sequence, ConstMatrixStep, QobjEvoStep
+public AbstractStep, support_inplace_compute, compute, compute!, compute_right, compute_right!,
+    compute_left, compute_left!, set_params!, get_init, get_mul, get_mul!, Sequence,
+    propagate!, pullback!, ConstMatrixStep, QobjEvoStep
 
 abstract type AbstractStep{OP,NParams} end
 
@@ -80,6 +81,35 @@ function compute_right!(res, step::AbstractStep, grad, L, R, gradR)
     compute!(res, step, gr, nothing, R)
     @inbounds for k in eachindex(grad)
         mul!(grad[k], L, gr[k])
+    end
+    return res
+end
+
+"""
+    compute_left(step::AbstractStep, grad, L, R, gradL)
+    compute_left!(res, step::AbstractStep, grad, L, R, gradL)
+
+The mirror of [`compute_right`](@ref): compute the left-multiplied operator `L * U` of the
+`step` (into `res` for the in-place version) and set `grad[k]` to `L * ∂U/∂p_k * R`.
+
+This is the form used by [`pullback!`](@ref) to propagate the left multiplier through the
+sequence. The default implementation uses the multiplied form of [`compute`](@ref) with `L`
+only and then multiplies the gradients by `R`, with `gradL` an array for the intermediate
+`L * ∂U/∂p_k` (see [`compute_right`](@ref)).
+"""
+function compute_left(step::AbstractStep, grad, L, R, gradL)
+    gl = @view gradL[1:length(grad)]
+    LU = compute(step, gl, L, nothing)
+    @inbounds for k in eachindex(grad)
+        grad[k] = gl[k] * R
+    end
+    return LU
+end
+function compute_left!(res, step::AbstractStep, grad, L, R, gradL)
+    gl = @view gradL[1:length(grad)]
+    compute!(res, step, gl, L, nothing)
+    @inbounds for k in eachindex(grad)
+        mul!(grad[k], gl[k], R)
     end
     return res
 end
@@ -190,6 +220,65 @@ function _LRFullBuffers(::Type{OP}, NParams, init, L, R) where OP
         sizes, init()::OP, [init()::OP for _ in 1:NParams], res)
 end
 
+# Arrays for the allocating computation with both left and right multipliers, typed from
+# the products of the multipliers with the operator type (see `compute`).
+struct _AllocLRBuffers{LT,RT,SZ,PB,SB}
+    sizes::SZ
+    prefix::Vector{PB} # P_j = L * U_1 * ... * U_(j-1) for j in 2:N
+    gradR::Vector{SB}  # for the steps' `compute_right` fallback
+end
+function _AllocLRBuffers(::Type{OP}, NSteps, NParams, mul, L, R) where OP
+    prefix = Vector{Base.promote_op(mul, typeof(L), OP)}(undef, NSteps)
+    gradR = Vector{Base.promote_op(mul, OP, typeof(R))}(undef, NParams)
+    sizes = (_lr_size(L), _lr_size(R))
+    return _AllocLRBuffers{typeof(L),typeof(R),typeof(sizes),eltype(prefix),eltype(gradR)}(
+        sizes, prefix, gradR)
+end
+
+function _make_lr_buf(::Type{OP}, NSteps, NParams, init, mul, mul!, left, right) where OP
+    if left === nothing && right === nothing
+        return nothing
+    elseif mul! === nothing
+        # Only needed for the gradients with both multipliers
+        return left === nothing || right === nothing ? nothing :
+            _AllocLRBuffers(OP, NSteps, NParams, mul, left, right)
+    elseif left !== nothing && right !== nothing
+        return _LRBuffers(OP, NSteps, NParams, init, left, right)
+    else
+        return _LRFullBuffers(OP, NParams, init, left, right)
+    end
+end
+
+# Buffers for `propagate!`/`pullback!`, allocated at construction from prototypes of the
+# multipliers of types `LT` and `RT` (both required).
+struct _VJPBuffers{LT,RT,SZ,RB,SB,PB,PP}
+    sizes::SZ
+    R::RB              # the right multiplier of the last `propagate!` (`Ref` or a copy)
+    suffix::Vector{SB} # S_j = U_j * ... * U_N * R for j in 1:N
+    prefix::PP         # two alternating buffers for the propagated left multiplier (in-place)
+    gradL::Vector{PB}  # per parameter buffers for L * ∂U_j, for the steps' `compute_left`
+end
+function _VJPBuffers(::Type{OP}, NSteps, NParams, init, mul, mul!, L, R) where OP
+    sizes = (_lr_size(L), _lr_size(R))
+    if mul! === nothing
+        Rbuf = Ref(R)
+        suffix = Vector{Base.promote_op(mul, OP, typeof(R))}(undef, NSteps)
+        prefix = nothing
+        gradL = Vector{Base.promote_op(mul, typeof(L), OP)}(undef, NParams)
+    else
+        U = init()::OP
+        Rbuf = copy(R)
+        suffix = [_product_buffer(U, R) for _ in 1:NSteps]
+        prefix = (_product_buffer(L, U), _product_buffer(L, U))
+        gradL = [_product_buffer(L, U) for _ in 1:NParams]
+    end
+    return _VJPBuffers{typeof(L),typeof(R),typeof(sizes),typeof(Rbuf),eltype(suffix),
+                       eltype(gradL),typeof(prefix)}(sizes, Rbuf, suffix, prefix, gradL)
+end
+_make_vjp_buf(::Type{OP}, NSteps, NParams, init, mul, mul!, left, right) where OP =
+    left === nothing || right === nothing ? nothing :
+    _VJPBuffers(OP, NSteps, NParams, init, mul, mul!, left, right)
+
 """
     Sequence{OP}(steps; init=..., mul=..., mul!=..., left=nothing, right=nothing)
 
@@ -214,11 +303,14 @@ steps). The buffers for the computation of the full operator are allocated at th
 use.
 
 `left` and `right` are prototypes (objects of the same type and size) of the left/right
-multipliers that will be passed to `compute`/`compute!` when using in-place
-multiplication, from which the corresponding buffers are allocated. Give both for the
-computation of `L * U * R`, or only one of them for `L * U` or `U * R`.
+multipliers that will be passed to `compute`/`compute!`, from which the corresponding
+buffers are allocated. They are required when using in-place multiplication: give both
+for the computation of `L * U * R`, or only one of them for `L * U` or `U * R`.
+With allocating multiplication, giving both avoids the allocation of the arrays for the
+gradients with both multipliers in each call. Both are also required for the
+reverse-mode evaluation with [`propagate!`](@ref) and [`pullback!`](@ref).
 """
-struct Sequence{OP,Steps<:Tuple,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf,LRBuf}
+struct Sequence{OP,Steps<:Tuple,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf,LRBuf,VJPBuf}
     steps::Steps
     # Buffers for the full operator, allocated at construction when the number of steps
     # is known from the type (without vectors of steps), otherwise at the first use
@@ -227,7 +319,8 @@ struct Sequence{OP,Steps<:Tuple,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf,L
     prefix_buf::PartialBuf
     suffix_buf::PartialBuf
     tmp_buf::TmpBuf # [Result, intermediate for gradient]
-    lr_buf::LRBuf   # `_LRBuffers`/`_LRFullBuffers` for left/right multipliers (in-place only)
+    lr_buf::LRBuf   # `_LRBuffers`/`_LRFullBuffers`/`_AllocLRBuffers` for left/right multipliers
+    vjp_buf::VJPBuf # `_VJPBuffers` for `propagate!`/`pullback!`
 
     init::Init
     mul::Mul
@@ -255,17 +348,12 @@ struct Sequence{OP,Steps<:Tuple,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf,L
             suffix_buf = _op_buf(OP, init, NSteps - 2)
         end
         tmp_buf = mul! === nothing ? nothing : (init()::OP, init()::OP)
-        lr_buf = if mul! === nothing || (left === nothing && right === nothing)
-            nothing
-        elseif left !== nothing && right !== nothing
-            _LRBuffers(OP, NSteps, NParams, init, left, right)
-        else
-            _LRFullBuffers(OP, NParams, init, left, right)
-        end
+        lr_buf = _make_lr_buf(OP, NSteps, NParams, init, mul, mul!, left, right)
+        vjp_buf = _make_vjp_buf(OP, NSteps, NParams, init, mul, mul!, left, right)
         return new{OP,typeof(steps),Init,Mul,Mul!,typeof(val_buf),typeof(grad_buf),
-                   typeof(prefix_buf),typeof(tmp_buf),typeof(lr_buf)}(
+                   typeof(prefix_buf),typeof(tmp_buf),typeof(lr_buf),typeof(vjp_buf)}(
                        steps, val_buf, grad_buf, prefix_buf, suffix_buf, tmp_buf, lr_buf,
-                       init, mul, mul!)
+                       vjp_buf, init, mul, mul!)
     end
 end
 Sequence{OP}(steps::AbstractVector; kws...) where OP = Sequence{OP}((steps,); kws...)
@@ -528,9 +616,9 @@ function _eval_compute(s::Sequence{OP}, has_grad) where OP
 end
 
 # A step of the propagation of the multipliers: `L * U` (`R === nothing`) or `U * R`
-# (`L === nothing`) without gradients, and `U * R` with the gradients `L * ∂U * R`
-# (`compute_right`). The results are computed into `buf` for the in-place computation
-# when supported by the step (`buf` is not used otherwise).
+# (`L === nothing`) without gradients, and `L * U` / `U * R` with the gradients
+# `L * ∂U * R` (`compute_left` / `compute_right`). The results are computed into `buf`
+# for the in-place computation when supported by the step (`buf` is not used otherwise).
 @inline function _mul_step(buf, step::AbstractStep{OP}, L, R, ::Val{inplace}) where {OP,inplace}
     dummy_grad = SVector{0,OP}()
     if inplace && support_inplace_compute(typeof(step))
@@ -545,6 +633,13 @@ end
         return buf
     end
     return compute_right(step, grad, L, R, gradR)
+end
+@inline function _left_step(buf, step, grad, L, R, gradL, ::Val{inplace}) where inplace
+    if inplace && support_inplace_compute(typeof(step))
+        compute_left!(buf, step, grad, L, R, gradL)
+        return buf
+    end
+    return compute_left(step, grad, L, R, gradL)
 end
 
 macro pick_mul(mul!, mul, out, a, b)
@@ -681,6 +776,18 @@ end
 @inline _mul_lr!(mul!, out, ::Nothing, X, R) = mul!(out, X, R)
 @inline _mul_lr!(mul!, out, L, X, ::Nothing) = mul!(out, L, X)
 
+# Propagation of a single multiplier without gradients, `L * U` or `U * R`
+function _propagate_one(s::Sequence, L, R)
+    if L === nothing
+        return _fold_steps(R, s, Val(true)) do X, step, _, _, _
+            _mul_step(nothing, step, nothing, X, Val(false))
+        end
+    end
+    return _fold_steps(L, s, Val(false)) do X, step, _, _, _
+        _mul_step(nothing, step, X, nothing, Val(false))
+    end
+end
+
 # The buffers of the sequence for the multipliers `L` and `R`, checked against the
 # prototypes: the types by dispatch, the sizes at runtime.
 function _lr_buffers(s::Sequence, L, R)
@@ -690,7 +797,7 @@ function _lr_buffers(s::Sequence, L, R)
     end
     return _check_lr_buffers(lr, L, R)
 end
-function _check_lr_buffers(lr::Union{_LRBuffers{LT,RT},_LRFullBuffers{LT,RT}}, L::LT, R::RT) where {LT,RT}
+function _check_lr_buffers(lr::Union{_LRBuffers{LT,RT},_LRFullBuffers{LT,RT},_AllocLRBuffers{LT,RT}}, L::LT, R::RT) where {LT,RT}
     if lr.sizes != (_lr_size(L), _lr_size(R))
         throw(ArgumentError("The left/right multipliers must have the size of the `left`/`right` prototypes given at construction"))
     end
@@ -716,7 +823,10 @@ thin products. This is much cheaper than computing the full operator when `L` an
 are "thin" (e.g. for a matrix element or a state). The cost scales with the number of
 steps plus the number of parameters.
 When only one multiplier is given, the full operator and gradients are computed and
-then multiplied.
+then multiplied, except for the allocating version without gradients, for which the
+multiplier is propagated through the steps.
+See [`propagate!`](@ref) and [`pullback!`](@ref) for the gradients of a function of
+`U * R`.
 
 With in-place multiplication, the sequence must be constructed with the prototypes
 `left`/`right` of the multipliers that are used (see [`Sequence`](@ref)), and the
@@ -738,8 +848,11 @@ function compute(s::Sequence{OP}, grads, L, R) where OP
     NParams = nparams(s)
     has_grad && @assert length(grads) == NParams
     if L === nothing || R === nothing
+        if !has_grad
+            return _propagate_one(s, L, R)
+        end
         # Full operator and gradients, then multiplied
-        full = Vector{OP}(undef, has_grad ? NParams : 0)
+        full = Vector{OP}(undef, NParams)
         U = compute(s, full)
         mul = s.mul
         @inbounds for k in eachindex(full)
@@ -749,11 +862,19 @@ function compute(s::Sequence{OP}, grads, L, R) where OP
     end
     if has_grad
         # Arrays for the prefixes and for the intermediate gradients of the steps'
-        # `compute_right` fallback (allocated once per call), typed from the products
-        # of the multipliers with the operator type (see `compute`)
-        mul = s.mul
-        prefix = Vector{Base.promote_op(mul, typeof(L), OP)}(undef, NSteps)
-        gradR = Vector{Base.promote_op(mul, OP, typeof(R))}(undef, NParams)
+        # `compute_right` fallback, typed from the products of the multipliers with the
+        # operator type (see `compute`): preallocated from the prototypes if given,
+        # otherwise allocated once per call
+        lr = s.lr_buf
+        if lr === nothing
+            mul = s.mul
+            prefix = Vector{Base.promote_op(mul, typeof(L), OP)}(undef, NSteps)
+            gradR = Vector{Base.promote_op(mul, OP, typeof(R))}(undef, NParams)
+        else
+            lr = _check_lr_buffers(lr, L, R)
+            prefix = lr.prefix
+            gradR = lr.gradR
+        end
         return _compute_lr!(nothing, s, grads, L, R, prefix, nothing, nothing, gradR,
                             Val(false), Val(true))
     end
@@ -801,6 +922,103 @@ function _compute_lr_buffered!(res, s::Sequence, grads, L, R, fb::_LRFullBuffers
     end
     _mul_lr!(mul!, res, L, fb.full_res, R)
     return res
+end
+
+##### Reverse-mode evaluation
+
+function _vjp_buffers(s::Sequence)
+    vb = s.vjp_buf
+    if vb === nothing
+        throw(ArgumentError("`propagate!`/`pullback!` require both the `left`/`right` prototypes at construction"))
+    end
+    return vb
+end
+function _check_vjp_right(vb::_VJPBuffers{LT,RT}, R::RT) where {LT,RT}
+    if vb.sizes[2] != _lr_size(R)
+        throw(ArgumentError("The right multiplier must have the size of the `right` prototype given at construction"))
+    end
+    return vb
+end
+_check_vjp_right(vb, R) =
+    throw(ArgumentError("The right multiplier must have the type of the `right` prototype given at construction"))
+function _check_vjp_left(vb::_VJPBuffers{LT}, L::LT) where LT
+    if vb.sizes[1] != _lr_size(L)
+        throw(ArgumentError("The left multiplier must have the size of the `left` prototype given at construction"))
+    end
+    return vb
+end
+_check_vjp_left(vb, L) =
+    throw(ArgumentError("The left multiplier must have the type of the `left` prototype given at construction"))
+
+# The right multiplier is copied (when mutable) so that it may be modified before `pullback!`
+@inline _store_right!(Rbuf::Base.RefValue, R) = (Rbuf[] = R isa AbstractArray && !isbits(R) ? copy(R) : R)
+@inline _store_right!(Rbuf, R) = copyto!(Rbuf, R)
+@inline _stored_right(Rbuf::Base.RefValue) = Rbuf[]
+@inline _stored_right(Rbuf) = Rbuf
+
+"""
+    propagate!(s::Sequence, R)
+    pullback!(s::Sequence, grads, L)
+
+Reverse-mode evaluation of the gradients for a sequence `s` with operator `U` and a
+right multiplier `R`, e.g. for the gradient of a function of the propagated state `U * R`.
+
+`propagate!` computes and returns `Y = U * R`, keeping the intermediate products
+`U_j * ... * U_N * R` of all the steps. The (co)tangent `L` can then be computed from `Y`
+(and possibly from the results of other sequences) and `pullback!` sets `grads[k]` to
+`L * ∂U/∂p_k * R` for the `R` of the last `propagate!` and returns `L * U`.
+(For a real function `f` of `Y`, the gradient is given by `real(grads[k])` with `L` the
+holomorphic part of the differential `df = real(L * dY)`.)
+`grads` may be empty, in which case only `L * U` is computed.
+
+Each step is called once in each of the two passes (`pullback!` uses
+[`compute_left`](@ref)), so that the total cost is the same as for [`compute`](@ref)
+with both multipliers, while `L` does not need to be known in advance.
+
+The sequence must be constructed with both the `left` and `right` prototypes of the
+multipliers. With in-place multiplication, the returned products are internal buffers.
+"""
+function propagate!(s::Sequence, R)
+    vb = _check_vjp_right(_vjp_buffers(s), R)
+    _store_right!(vb.R, R)
+    return _propagate!(s, _stored_right(vb.R), vb.suffix, Val(s.mul! !== nothing))
+end
+
+function pullback!(s::Sequence, grads, L)
+    vb = _check_vjp_left(_vjp_buffers(s), L)
+    has_grad = !isempty(grads)
+    has_grad && @assert length(grads) == nparams(s)
+    prefix = vb.prefix
+    prefix = prefix === nothing ? (nothing, nothing) : prefix
+    R = _stored_right(vb.R)
+    inplace = Val(s.mul! !== nothing)
+    if has_grad
+        return _pullback!(s, grads, L, R, vb.suffix, prefix, vb.gradL, inplace, Val(true))
+    end
+    return _pullback!(s, grads, L, R, vb.suffix, prefix, vb.gradL, inplace, Val(false))
+end
+
+function _propagate!(s::Sequence, R, suffix, ip::Val{inplace}) where inplace
+    return _fold_steps(R, s, Val(true)) do S, step, j, _, _
+        S = _mul_step(inplace ? @inbounds(suffix[j]) : nothing, step, nothing, S, ip)
+        @inbounds suffix[j] = S
+        return S
+    end
+end
+
+function _pullback!(s::Sequence, grads, L, R, suffix, prefix, gradL,
+                    ip::Val{inplace}, ::Val{has_grad}) where {inplace,has_grad}
+    return _fold_steps(L, s, Val(false)) do P, step, j, prange, pos
+        _, islast = _pos(pos)
+        # The suffix of the next step
+        Sn = islast ? R : @inbounds(suffix[j + 1])
+        buf = inplace ? @inbounds(prefix[isodd(j) ? 1 : 2]) : nothing
+        if has_grad
+            return @inbounds _left_step(buf, step, @view(grads[prange]), P, Sn,
+                                        @view(gradL[prange]), ip)
+        end
+        return _mul_step(buf, step, P, nothing, ip)
+    end
 end
 
 function compute!(res::OP, s::Sequence{OP}, grads) where OP
@@ -1222,15 +1440,16 @@ function compute(step::ConstMatrixStep, grad, L, R)
     if L === nothing && R === nothing
         return compute(step, grad)
     end
-    return _compute_lr(step, grad, L, R, Val(false))
+    return _compute_lr(step, grad, L, R, Val(:both))
 end
 # The gradient buffers are not needed (the gradients are evaluated with both multipliers)
-compute_right(step::ConstMatrixStep, grad, L, R, gradR) = _compute_lr(step, grad, L, R, Val(true))
+compute_right(step::ConstMatrixStep, grad, L, R, gradR) = _compute_lr(step, grad, L, R, Val(:right))
+compute_left(step::ConstMatrixStep, grad, L, R, gradL) = _compute_lr(step, grad, L, R, Val(:left))
 
-# `RightOnly` selects the returned operator: `U * R` (`true`) or `L * U * R` (`false`);
-# the gradients are always multiplied on both sides.
+# `Mode` selects the returned operator: `U * R` (`:right`), `L * U` (`:left`) or
+# `L * U * R` (`:both`); the gradients are always multiplied on both sides.
 function _compute_lr(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad, L, R,
-                     ::Val{RightOnly}) where {OP,NParams,NH,PT,Herm,RightOnly}
+                     ::Val{Mode}) where {OP,NParams,NH,PT,Herm,Mode}
     A = _assemble(step)
     s = Imaginary(-step.t)
     if size(A) == (2, 2)
@@ -1249,7 +1468,7 @@ function _compute_lr(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad, L, R,
                 @inbounds grad[NParams] = _lrmul(L, _NEG_IM .* (A * Um), R)
             end
         end
-        return RightOnly ? _rmul(Um, R) : _lrmul(L, Um, R)
+        return Mode === :right ? _rmul(Um, R) : Mode === :left ? _lmul(L, Um) : _lrmul(L, Um, R)
     end
     λ, V, W = _eigen_decomp(A, Val(Herm))
     hv = exp.((s / 2) .* λ)
@@ -1259,7 +1478,7 @@ function _compute_lr(step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad, L, R,
     Ve = V .* transpose(eλ) # V * Diagonal(eλ)
     AL = _lmul(L, V)
     BR = _rmul(W, R)
-    U = RightOnly ? Ve * BR : _lmul(L, Ve) * BR
+    U = Mode === :right ? Ve * BR : Mode === :left ? _lmul(L, Ve) * W : _lmul(L, Ve) * BR
     if !isempty(grad)
         @assert length(grad) == NParams
         Φ = _phi.(s, hv, transpose(hv), λ, transpose(λ))
@@ -1300,13 +1519,15 @@ function compute!(res, step::ConstMatrixStep, grad, L, R)
     if L === nothing && R === nothing
         return compute!(res, step, grad)
     end
-    return _compute_lr!(res, step, grad, L, R, Val(false))
+    return _compute_lr!(res, step, grad, L, R, Val(:both))
 end
 compute_right!(res, step::ConstMatrixStep, grad, L, R, gradR) =
-    _compute_lr!(res, step, grad, L, R, Val(true))
+    _compute_lr!(res, step, grad, L, R, Val(:right))
+compute_left!(res, step::ConstMatrixStep, grad, L, R, gradL) =
+    _compute_lr!(res, step, grad, L, R, Val(:left))
 
 function _compute_lr!(res, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad, L, R,
-                      ::Val{RightOnly}) where {OP,NParams,NH,PT,Herm,RightOnly}
+                      ::Val{Mode}) where {OP,NParams,NH,PT,Herm,Mode}
     buf = step.buf
     if buf === nothing
         throw(ArgumentError("In-place compute is not supported for immutable matrix type $OP"))
@@ -1322,8 +1543,10 @@ function _compute_lr!(res, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad, L
         tmp1 = _set2!(buf.tmp1, U)
         tmp2 = buf.tmp2
         T1 = R === nothing ? nothing : _scratch_arrays(buf, rdims)[1]
-        if RightOnly
+        if Mode === :right
             _rmul!(res, tmp1, R)
+        elseif Mode === :left
+            mul!(res, L, tmp1)
         else
             _lrmul!(res, L, tmp1, R, T1)
         end
@@ -1350,14 +1573,14 @@ function _compute_lr!(res, step::ConstMatrixStep{OP,NParams,NH,PT,Herm}, grad, L
     ALbuf, ALe, BRbuf, T1 = _scratch_arrays(buf, (m, n), (m, n), rdims, rdims)
     AL = L === nothing ? V : mul!(ALbuf, L, V)
     BR = R === nothing ? W : mul!(BRbuf, W, R)
-    if RightOnly
+    if Mode === :right
         tmp1 = copyto!(buf.tmp1, V)
         rmul!(tmp1, Diagonal(eλ))
         mul!(res, tmp1, BR)
     else
         copyto!(ALe, AL)
         rmul!(ALe, Diagonal(eλ))
-        mul!(res, ALe, BR)
+        mul!(res, ALe, Mode === :left ? W : BR)
     end
     if !isempty(grad)
         @assert length(grad) == NParams
