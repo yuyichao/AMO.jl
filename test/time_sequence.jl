@@ -149,13 +149,28 @@ function TS.compute!(res::VT, op::IStep3{VT}, grad) where VT
 end
 TS.support_inplace_compute(::Type{<:IStep3}) = true
 
+# Whether the steps (possibly nested in tuples and vectors) contain vectors
+has_vector(::TS.AbstractStep) = false
+has_vector(::AbstractVector) = true
+has_vector(t::Tuple) = any(has_vector, t)
+# The step type for steps that may consist of a single step, otherwise `nothing`
+single_step(e::TS.AbstractStep) = typeof(e)
+single_step(t::Tuple) = length(t) == 1 ? single_step(t[1]) : nothing
+single_step(v::AbstractVector) = single_step(v[1])
+
 function test_scalar_sequence(s::TS.Sequence{VT}) where VT
-    NP = TS.nparams(typeof(s))
-    @test TS.nparams(s) == NP
+    NP = TS.nparams(s)
+    if !has_vector(s.steps)
+        @test TS.nparams(typeof(s)) == NP
+    else
+        @test_throws ArgumentError TS.nparams(typeof(s))
+    end
     if VT === Float64
         @test !TS.support_inplace_compute(typeof(s))
     else
-        @test TS.support_inplace_compute(typeof(s)) == (length(s.steps) != 1 || TS.support_inplace_compute(typeof(s.steps[1])))
+        single = single_step(s.steps)
+        @test TS.support_inplace_compute(typeof(s)) ==
+            (single === nothing || TS.support_inplace_compute(single))
     end
 
     for _ in 1:10
@@ -241,9 +256,68 @@ end
     @test TS.nparams(s3) == 3
     test_scalar_sequence(s3)
 
+    for n in (1, 2, 3, 4, 12)
+        sv = TS.Sequence{VT}([Step2{VT}() for _ in 1:n]; kws...)
+        @test TS.nparams(sv) == 2n
+        test_scalar_sequence(sv)
+    end
+
+    # Mixed single steps and vectors of steps
+    elem_nparams(e) = e isa TS.AbstractStep ? TS.nparams(e) : sum(elem_nparams, e)
+    svec(T, n) = [T{VT}() for _ in 1:n]
+    function test_mixed(T1, T2, T3)
+        for n in (1, 2, 3), m in (1, 4)
+            for steps in ((T1{VT}(), svec(T2, n)), (svec(T2, n), T3{VT}()),
+                          (T3{VT}(), svec(T2, n), T1{VT}()),
+                          (svec(T2, n), svec(T3, m)),
+                          (svec(T1, m), T2{VT}(), svec(T3, n), T1{VT}(), svec(T1, m)))
+                sm = TS.Sequence{VT}(steps; kws...)
+                @test TS.nparams(sm) == sum(elem_nparams, steps)
+                test_scalar_sequence(sm)
+            end
+        end
+    end
+    test_mixed(Step1, Step2, Step3)
+    # Nested tuples and vectors
+    function test_nested(T1, T2, T3)
+        for n in (1, 2, 3), m in (1, 3)
+            group() = (T1{VT}(), svec(T2, m), T3{VT}())
+            for steps in (([(T1{VT}(), T2{VT}()) for _ in 1:n],),
+                          ([group() for _ in 1:n],),
+                          (T3{VT}(), [group() for _ in 1:n], T1{VT}()),
+                          ([[group() for _ in 1:m] for _ in 1:n],),
+                          ([svec(T2, m) for _ in 1:n], (T1{VT}(), (svec(T3, n),))),
+                          ([(svec(T1, m),) for _ in 1:n], [[(T2{VT}(),)] for _ in 1:m]),
+                          ((T1{VT}(),),), ([[T2{VT}()]],), ((svec(T3, n),),))
+                sm = TS.Sequence{VT}(steps; kws...)
+                @test TS.nparams(sm) == sum(elem_nparams, steps)
+                test_scalar_sequence(sm)
+            end
+        end
+    end
+    test_nested(Step1, Step2, Step3)
+    @test_throws ArgumentError TS.Sequence{VT}((Step1{VT}(), ()); kws...)
+    @test_throws ArgumentError TS.Sequence{VT}(((Step1{VT}(), Step2{VT}[]),); kws...)
+    @test_throws ArgumentError TS.Sequence{VT}([(Step1{VT}(),), (Step2{VT}(),)]; kws...)
+    @test_throws ArgumentError TS.Sequence{VT}([[Step1{VT}()], Step1{VT}[]]; kws...)
+    @test_throws ArgumentError TS.Sequence{VT}((Step1{VT}(), Step2{VT}[]); kws...)
+    @test_throws ArgumentError TS.Sequence{VT}((Step1{VT}(), [Step2{VT}(), Step3{VT}()]); kws...)
+
     if VT === Float64
         continue
     end
+
+    for n in (1, 2, 3, 4, 12)
+        sv = TS.Sequence{VT}([IStep3{VT}() for _ in 1:n]; kws...)
+        @test TS.nparams(sv) == 3n
+        test_scalar_sequence(sv)
+    end
+    test_mixed(IStep1, IStep2, IStep3)
+    test_mixed(IStep1, Step2, IStep3)
+    test_mixed(Step1, IStep2, Step3)
+    test_nested(IStep1, IStep2, IStep3)
+    test_nested(IStep1, Step2, IStep3)
+    test_nested(Step1, IStep2, Step3)
 
     ops = (IStep1{VT}(), IStep2{VT}(), IStep3{VT}(), IStep1{VT}(),
            IStep1{VT}(), IStep2{VT}(), IStep3{VT}(), IStep2{VT}(),
@@ -889,6 +963,81 @@ end
             @test_throws ArgumentError TS.compute!(zeros(ComplexF64, 1, 1), s, MT[], L, R)
             TS.set_params!(s, randn(rng, TS.nparams(s)))
             @test TS.compute!(zeros(ComplexF64, 1, n), s, MT[], L, nothing) ≈ L * TS.compute(s, MT[])
+        end
+    end
+    @testset "Mixed and nested Sequence [$OP]" for OP in (MT, SMatrix{4,4,ComplexF64,16})
+        n = 4
+        make_step() = TS.ConstMatrixStep{OP}((rand_herm(n), rand_herm(n)); H0=rand_herm(n),
+                                             param_t=true)
+        make_step1() = TS.ConstMatrixStep{OP}((rand_herm(n),); H0=rand_herm(n))
+        approx(a, b) = isapprox(a, b, rtol=1e-9, atol=1e-11)
+        inplace_list = OP <: Matrix ? (false, true) : (false,)
+        for NSteps in (1, 2, 3, 6), inplace in inplace_list
+            kws = inplace ? (; mul=nothing, mul! = LinearAlgebra.mul!) : (;)
+            steps = [make_step() for _ in 1:NSteps]
+            o1 = make_step1()
+            o2 = make_step1()
+            # Vectors of steps mixed with single steps and the same steps unrolled
+            layouts = Any[((steps,), Tuple(steps)),
+                          ((o1, steps), (o1, steps...)),
+                          ((steps, o1), (steps..., o1)),
+                          ((o1, steps, o2), (o1, steps..., o2)),
+                          ((steps, [o1, o2]), (steps..., o1, o2))]
+            if NSteps >= 2
+                push!(layouts, ((steps[1:1], o1, steps[2:end]), (steps[1], o1, steps[2:end]...)))
+            end
+            # Nested: repeated groups of steps
+            os = [make_step1() for _ in 1:NSteps]
+            push!(layouts, ([(steps[i], os[i]) for i in 1:NSteps],
+                            Tuple(Iterators.flatten((steps[i], os[i]) for i in 1:NSteps))))
+            push!(layouts, ((o1, [(os[i], [steps[i]]) for i in 1:NSteps], o2),
+                            (o1, Iterators.flatten((os[i], steps[i]) for i in 1:NSteps)..., o2)))
+            if NSteps >= 2
+                h = NSteps ÷ 2
+                push!(layouts, ((o1, [steps[1:h], steps[h + 1:2h]]), (o1, steps[1:2h]...)))
+            end
+            for (layout, flat) in layouts
+                s = TS.Sequence{OP}(layout; kws...)
+                st = TS.Sequence{OP}(flat; kws...)
+                NP = TS.nparams(s)
+                @test NP == TS.nparams(st) == sum(TS.nparams, flat)
+                @test TS.support_inplace_compute(typeof(s)) == inplace
+                params = randn(rng, NP)
+                TS.set_params!(s, params)
+                gfull = [OP(zeros(n, n)) for _ in 1:NP]
+                Ufull = copy(TS.compute(s, gfull))
+                gfull = copy.(gfull)
+                # The steps are shared with `st`
+                TS.set_params!(st, params)
+                gt = [OP(zeros(n, n)) for _ in 1:NP]
+                @test approx(Ufull, TS.compute(st, gt))
+                for k in 1:NP
+                    @test approx(gfull[k], gt[k])
+                end
+                @test approx(TS.compute(s, OP[]), Ufull)
+                if inplace
+                    res = zeros(ComplexF64, n, n)
+                    g2 = [zeros(ComplexF64, n, n) for _ in 1:NP]
+                    @test TS.compute!(res, s, g2) === res
+                    @test approx(res, Ufull)
+                    for k in 1:NP
+                        @test approx(g2[k], gfull[k])
+                    end
+                end
+                for (L, R) in multipliers(n)
+                    if OP <: SMatrix
+                        L = L === nothing ? nothing : SMatrix{size(L)...}(L)
+                        R = R === nothing ? nothing :
+                            (R isa AbstractVector ? SVector{length(R)}(R) : SMatrix{size(R)...}(R))
+                    end
+                    if !inplace && L === nothing && R === nothing
+                        continue
+                    end
+                    lr = inplace ? (; left=L, right=R) : (;)
+                    sl = TS.Sequence{OP}(layout; kws..., lr...)
+                    test_lr_step(sl, L, R, Ufull, gfull; rng)
+                end
+            end
         end
     end
 end

@@ -131,9 +131,15 @@ get_init(T) = nothing
 get_mul(T) = *
 get_mul!(T) = nothing
 
+# The first step of an element of the `steps` of a `Sequence` (a step, or a tuple or
+# vector of elements)
+@inline _elem_first(step::AbstractStep) = step
+@inline _elem_first(steps::Union{Tuple,AbstractVector}) =
+    isempty(steps) ? nothing : _elem_first(@inbounds(steps[1]))
+
 _first_init(::Tuple{}) = nothing
 function _first_init(steps::Tuple)
-    init = get_init(steps[1])
+    init = get_init(_elem_first(steps[1]))
     return init === nothing ? _first_init(Base.tail(steps)) : init
 end
 function _default_init(::Type{OP}, steps) where OP
@@ -187,24 +193,35 @@ end
 """
     Sequence{OP}(steps; init=..., mul=..., mul!=..., left=nothing, right=nothing)
 
-The time-ordered product `U = U_1 * U_2 * ... * U_N` of the operators of the `steps`
-(a tuple of [`AbstractStep`](@ref)s with operator type `OP`), whose parameters are the
+The time-ordered product `U = U_1 * U_2 * ... * U_N` of the operators of the steps
+(of type [`AbstractStep`](@ref) with operator type `OP`), whose parameters are the
 concatenated parameters of the steps. The operator and its gradient are computed with
 [`compute`](@ref) / [`compute!`](@ref), with a cost linear in the number of steps and
 the number of parameters.
 
+`steps` is a tuple whose elements are either a single step, or a nonempty tuple or
+vector of such elements, standing for its steps in order. The elements of a vector must
+have the same concrete type, e.g. the time slices of a pulse, or a repeated group of steps
+as a vector of tuples. The computation is unrolled over the tuples, so that the steps can
+have different types, and loops over the vectors, so that the compilation time and the code
+size do not depend on the length of the vectors. A vector `steps` is the same as
+`(steps,)`. The vectors are copied at construction.
+
 The products use `mul` (allocating, default `get_mul(OP)`) or `mul!` (in-place, default
 `get_mul!(OP)`, with `mul=nothing`). In-place multiplication requires `init`, a function
 creating new `OP` objects for the buffers (default [`get_init`](@ref) of `OP` or of the
-steps).
+steps). The buffers for the computation of the full operator are allocated at the first
+use.
 
 `left` and `right` are prototypes (objects of the same type and size) of the left/right
 multipliers that will be passed to `compute`/`compute!` when using in-place
 multiplication, from which the corresponding buffers are allocated. Give both for the
 computation of `L * U * R`, or only one of them for `L * U` or `U * R`.
 """
-struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf,LRBuf}
+struct Sequence{OP,Steps<:Tuple,Init,Mul,Mul!,ValBuf,GradBuf,PartialBuf,TmpBuf,LRBuf}
     steps::Steps
+    # Buffers for the full operator, allocated at construction when the number of steps
+    # is known from the type (without vectors of steps), otherwise at the first use
     val_buf::ValBuf
     grad_buf::GradBuf
     prefix_buf::PartialBuf
@@ -216,40 +233,27 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
     mul::Mul
     mul!::Mul!
 
-    function Sequence{OP}(steps::Steps; init::Init=_default_init(OP, steps),
+    function Sequence{OP}(steps::Tuple; init::Init=_default_init(OP, steps),
                           mul::Mul=get_mul(OP), mul!::(Mul!)=get_mul!(OP),
-                          left=nothing, right=nothing) where Steps<:NTuple{NSteps,AbstractStep{OP}} where {OP,NSteps,Init,Mul,Mul!}
-        @assert NSteps > 0
+                          left=nothing, right=nothing) where {OP,Init,Mul,Mul!}
         if mul! !== nothing
             @assert init !== nothing
             @assert mul === nothing
         end
-        NParams = sum(nparams, steps)
-        op_isbits = isbitstype(OP)
-
-        function op_mem(n)
-            mem = Memory{OP}(undef, n)
-            if init !== nothing
-                @inbounds for i in 1:n
-                    mem[i] = init()::OP
-                end
-            end
-            return mem
-        end
-        op_mvec(n) = (init !== nothing ? MVector(ntuple(_->init()::OP, n)) :
-            MVector{n,OP}(undef))
-        op_buf(n) = if n <= 0
-            return nothing
-        elseif !op_isbits
-            return op_mem(n)
+        steps = _seq_elem(OP, steps)
+        NSteps = _elem_nsteps(steps)
+        NParams = _elem_nparams(steps)
+        if _static_count(typeof(steps), :steps) === nothing
+            val_buf = OP[]
+            grad_buf = OP[]
+            prefix_buf = OP[]
+            suffix_buf = OP[]
         else
-            return op_mvec(n)
+            val_buf = _op_buf(OP, init, NSteps)
+            grad_buf = _op_buf(OP, init, NParams)
+            prefix_buf = _op_buf(OP, init, NSteps - 2)
+            suffix_buf = _op_buf(OP, init, NSteps - 2)
         end
-
-        val_buf = op_buf(NSteps)
-        grad_buf = op_buf(NParams)
-        prefix_buf = op_buf(NSteps - 2)
-        suffix_buf = op_buf(NSteps - 2)
         tmp_buf = mul! === nothing ? nothing : (init()::OP, init()::OP)
         lr_buf = if mul! === nothing || (left === nothing && right === nothing)
             nothing
@@ -258,73 +262,289 @@ struct Sequence{OP,NSteps,Steps<:NTuple{NSteps,AbstractStep},NParams,Init,Mul,Mu
         else
             _LRFullBuffers(OP, NParams, init, left, right)
         end
-        s = new{OP,NSteps,Steps,NParams,Init,Mul,Mul!,typeof(val_buf),typeof(grad_buf),
-                typeof(prefix_buf),typeof(tmp_buf),typeof(lr_buf)}(
-                    steps, val_buf, grad_buf, prefix_buf, suffix_buf,
-                    tmp_buf, lr_buf, init, mul, mul!)
+        return new{OP,typeof(steps),Init,Mul,Mul!,typeof(val_buf),typeof(grad_buf),
+                   typeof(prefix_buf),typeof(tmp_buf),typeof(lr_buf)}(
+                       steps, val_buf, grad_buf, prefix_buf, suffix_buf, tmp_buf, lr_buf,
+                       init, mul, mul!)
+    end
+end
+Sequence{OP}(steps::AbstractVector; kws...) where OP = Sequence{OP}((steps,); kws...)
+
+# A buffer of `n` `OP` objects of a size known at construction
+function _op_buf(::Type{OP}, init, n) where OP
+    n = max(n, 0)
+    mem = Memory{OP}(undef, n)
+    if init !== nothing
+        @inbounds for i in 1:n
+            mem[i] = init()::OP
+        end
+    end
+    return mem
+end
+
+# The elements of the `steps` of a `Sequence`: a step, or a nonempty tuple or vector
+# (of a concrete element type) of elements. The vectors are copied.
+_seq_elem(::Type{OP}, step::AbstractStep{OP}) where OP = step
+function _seq_elem(::Type{OP}, steps::Tuple) where OP
+    if isempty(steps)
+        throw(ArgumentError("The tuples of steps must not be empty"))
+    end
+    return map(Base.Fix1(_seq_elem, OP), steps)
+end
+function _seq_elem(::Type{OP}, steps::AbstractVector) where OP
+    if !isconcretetype(eltype(steps))
+        throw(ArgumentError("The elements of a vector of steps must have the same concrete type"))
+    end
+    if isempty(steps)
+        throw(ArgumentError("The vectors of steps must not be empty"))
+    end
+    res = map(Base.Fix1(_seq_elem, OP), steps)
+    if !isconcretetype(eltype(res))
+        throw(ArgumentError("The elements of a vector of steps must have the same concrete type"))
+    end
+    return res
+end
+_elem_nsteps(::AbstractStep) = 1
+_elem_nsteps(steps::Union{Tuple,AbstractVector}) = sum(_elem_nsteps, steps)
+_elem_nparams(step::AbstractStep) = nparams(step)
+_elem_nparams(steps::Union{Tuple,AbstractVector}) = sum(_elem_nparams, steps)
+
+@inline _first_step(s::Sequence) = _elem_first(s.steps)
+
+# The number of steps (`kind === :steps`) or of parameters (`kind === :params`) of an
+# element of type `T` if known from the type (i.e. without vectors), otherwise `nothing`
+function _static_count(T, kind)
+    if T <: AbstractStep
+        return kind === :steps ? 1 : nparams(T)
+    elseif T <: Tuple
+        c = 0
+        for ET in fieldtypes(T)
+            ec = _static_count(ET, kind)
+            ec === nothing && return nothing
+            c += ec
+        end
+        return c
+    end
+    return nothing
+end
+# Expression for the number of steps or of parameters of the element `e` of type `T`
+function _count_expr(T, e, kind)
+    c = _static_count(T, kind)
+    c !== nothing && return c
+    if T <: Tuple
+        n = 0
+        ex = Any[]
+        for (k, ET) in enumerate(fieldtypes(T))
+            ec = _count_expr(ET, :($e[$k]), kind)
+            ec isa Int ? (n += ec) : push!(ex, ec)
+        end
+        return :(+($n, $(ex...)))
+    end
+    ET = eltype(T)
+    ec = _static_count(ET, kind)
+    if ec !== nothing
+        return :(length($e) * $ec)
+    end
+    x = gensym(:x)
+    acc = gensym(:acc)
+    return quote
+        $acc = 0
+        for $x in $e
+            $acc += $(_count_expr(ET, x, kind))
+        end
+        $acc
+    end
+end
+
+@generated _nsteps(s::Sequence{OP,Steps}) where {OP,Steps} =
+    :(@inbounds $(_count_expr(Steps, :(s.steps), :steps)))
+@generated nparams(s::Sequence{OP,Steps}) where {OP,Steps} =
+    :(@inbounds $(_count_expr(Steps, :(s.steps), :params)))
+@generated function nparams(::Type{<:Sequence{OP,Steps}}) where {OP,Steps}
+    c = _static_count(Steps, :params)
+    if c === nothing
+        return :(throw(ArgumentError("The number of parameters of a `Sequence` with vectors of steps is not known from its type")))
+    end
+    return c
+end
+
+# For an element of type `T` that may consist of a single step, the type of the step
+# and whether the element is always a single step (without vectors), otherwise `nothing`
+function _single_step(T)
+    if T <: AbstractStep
+        return (T, true)
+    elseif T <: Tuple
+        Ts = fieldtypes(T)
+        return length(Ts) == 1 ? _single_step(Ts[1]) : nothing
+    end
+    res = _single_step(eltype(T))
+    return res === nothing ? nothing : (res[1], false)
+end
+
+# A sequence of a single step is computed by the step
+Base.@assume_effects :foldable function support_inplace_compute(::Type{<:Sequence{OP,Steps,Init,Mul,Mul!}}) where {OP,Steps,Init,Mul,Mul!}
+    single = _single_step(Steps)
+    if single === nothing
+        return Mul! !== Nothing
+    end
+    StepT, always = single
+    if always
+        return support_inplace_compute(StepT)
+    end
+    return Mul! !== Nothing && support_inplace_compute(StepT)
+end
+
+@inline _pos(::Val{pos}) where pos = pos
+
+# The code of `_fold_steps` for the element `e` of type `T`, where `pos` is whether the
+# element is at the start/end of the sequence
+function _fold_expr(T, e, pos, rev)
+    isfirst, islast = pos
+    if T <: AbstractStep
+        np = nparams(T)
+        return rev ? quote
+            X = f(X, $e, j, (p - $(np - 1)):p, Val($pos))
+            j -= 1
+            p -= $np
+        end : quote
+            j += 1
+            X = f(X, $e, j, (p + 1):(p + $np), Val($pos))
+            p += $np
+        end
+    end
+    v = gensym(:e)
+    body = Any[:($v = $e)]
+    if T <: Tuple
+        Ts = fieldtypes(T)
+        K = length(Ts)
+        for k in (rev ? (K:-1:1) : (1:K))
+            push!(body, _fold_expr(Ts[k], :($v[$k]), (isfirst && k == 1, islast && k == K), rev))
+        end
+        return Expr(:block, body...)
+    end
+    ET = eltype(T)
+    n = gensym(:n)
+    i = gensym(:i)
+    elem(idx, pos) = _fold_expr(ET, :($v[$idx]), pos, rev)
+    loop(r) = :(for $i in $r
+                    $(elem(i, (false, false)))
+                end)
+    push!(body, :($n = length($v)))
+    first_elems = Any[elem(1, (true, false))]
+    last_elems = Any[elem(n, (false, true))]
+    if isfirst && islast
+        mid_elems = rev ? (last_elems..., loop(:($n - 1:-1:2)), first_elems...) :
+            (first_elems..., loop(:(2:$n - 1)), last_elems...)
+        push!(body, :(if $n == 1
+                          $(elem(1, (true, true)))
+                      else
+                          $(mid_elems...)
+                      end))
+    elseif isfirst
+        append!(body, rev ? (loop(:($n:-1:2)), first_elems...) :
+                            (first_elems..., loop(:(2:$n))))
+    elseif islast
+        append!(body, rev ? (last_elems..., loop(:($n - 1:-1:1))) :
+                            (loop(:(1:$n - 1)), last_elems...))
+    else
+        push!(body, loop(rev ? :($n:-1:1) : :(1:$n)))
+    end
+    return Expr(:block, body...)
+end
+
+# Call `X = f(X, step, j, prange, pos)` for each step `j` of the sequence in order
+# (or in reverse order for `rev`), with `prange` the range of its parameters and
+# `pos = Val((j == 1, j == N))`, and return the final `X`. The calls are unrolled over
+# the tuples and loop over the vectors of steps, from which the first and last steps are
+# peeled so that `f` can treat them differently at compile time (and the type of `X`
+# within the loops is the one after the first call).
+@generated function _fold_steps(f::F, X, s::Sequence{OP,Steps}, ::Val{rev}) where {F,OP,Steps,rev}
+    return quote
+        $(Expr(:meta, :inline))
+        $(rev ? :(j = _nsteps(s); p = nparams(s)) : :(j = 0; p = 0))
+        @inbounds begin
+            $(_fold_expr(Steps, :(s.steps), (true, true), rev))
+        end
+        return X
+    end
+end
+
+function set_params!(s::Sequence, params::AbstractVector)
+    @assert length(params) == nparams(s)
+    _fold_steps(nothing, s, Val(false)) do _, step, _, prange, _
+        @inline set_params!(step, @inbounds(@view(params[prange])))
+        return
+    end
+    return
+end
+
+# The buffers for the full operator, which are allocated at the first use with vectors
+# of steps
+@inline _full_buffers!(s::Sequence) = s
+function _full_buffers!(s::Sequence{OP,Steps,Init,Mul,Mul!,Vector{OP}}) where {OP,Steps,Init,Mul,Mul!}
+    N = _nsteps(s)
+    if length(s.val_buf) == N
         return s
     end
-end
-
-(nparams(::Type{<:Sequence{OP,NSteps,Steps,NParams}}) where {OP,NSteps,Steps,NParams}) = NParams
-nparams(s::Sequence) = nparams(typeof(s))
-
-Base.@assume_effects :foldable function support_inplace_compute(::Type{<:Sequence{OP,NSteps,Steps,NParams,Init,Mul,Mul!}}) where {OP,NSteps,Steps,NParams,Init,Mul,Mul!}
-    if NSteps == 1
-        return support_inplace_compute(Steps.parameters[1])
-    end
-    return Mul! !== Nothing
-end
-
-@generated function _param_range(::Type{<:Sequence{OP,NSteps,Steps}}) where {OP,NSteps,Steps}
-    StepTypes = (Steps.parameters...,)
-    step_nparams = nparams.(StepTypes)
-    cum_nparams = cumsum(step_nparams)
-    starts = (0, cum_nparams[1:end - 1]...) .+ 1
-    return starts, cum_nparams
-end
-
-@generated function set_params!(s::Sequence, params::AbstractVector)
-    ex = quote
-        @assert length(params) == $(nparams(s))
-        steps = s.steps
-    end
-    starts, ends = _param_range(s)
-    for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))
-        push!(ex.args, :(@inline set_params!(@inbounds(steps[$i]),
-                                             @view params[$start_idx:$end_idx])))
-    end
-    push!(ex.args, :(return))
-    return ex
-end
-
-# Insert a `nothing` prefix to the array to avoid the compiler optimize out
-# the line number node when interpolating the expression to the parent function.
-__eval_compute_body(starts, ends, has_grad) = insert!(Any[
-    quote
-        step = steps[$i]
-        stepgrad = $(has_grad ? :(@view(grad_buf[$start_idx:$end_idx])) : :dummy_grad)
-        if support_inplace_compute(typeof(step))
-            compute!(val_buf[$i], step, stepgrad)
-        else
-            val_buf[$i] = compute(step, stepgrad)
-        end
-    end for (i, (start_idx, end_idx)) in enumerate(zip(starts, ends))], 1, :nothing)
-
-@generated function _eval_compute(s::Sequence{OP}, grads, has_grad) where OP
-    starts, ends = _param_range(s)
-    ex = quote
-        steps = s.steps
-        grad_buf = s.grad_buf
-        val_buf = s.val_buf
-        @inbounds @inline if has_grad
-            $(__eval_compute_body(starts, ends, true)...)
-        else
-            dummy_grad = SVector{0,OP}()
-            $(__eval_compute_body(starts, ends, false)...)
+    init = s.init
+    function fill_buf!(buf, n)
+        resize!(buf, n)
+        if init !== nothing
+            @inbounds for i in 1:n
+                buf[i] = init()::OP
+            end
         end
     end
-    return ex
+    fill_buf!(s.val_buf, N)
+    fill_buf!(s.grad_buf, nparams(s))
+    fill_buf!(s.prefix_buf, max(N - 2, 0))
+    fill_buf!(s.suffix_buf, max(N - 2, 0))
+    return s
+end
+
+@inline function _compute_val!(val_buf, j, step, stepgrad)
+    @inbounds if support_inplace_compute(typeof(step))
+        compute!(val_buf[j], step, stepgrad)
+    else
+        val_buf[j] = compute(step, stepgrad)
+    end
+    return
+end
+
+function _eval_compute(s::Sequence{OP}, has_grad) where OP
+    val_buf = s.val_buf
+    grad_buf = s.grad_buf
+    if has_grad
+        _fold_steps(nothing, s, Val(false)) do _, step, j, prange, _
+            _compute_val!(val_buf, j, step, @inbounds(@view(grad_buf[prange])))
+        end
+    else
+        dummy_grad = SVector{0,OP}()
+        _fold_steps(nothing, s, Val(false)) do _, step, j, _, _
+            _compute_val!(val_buf, j, step, dummy_grad)
+        end
+    end
+    return
+end
+
+# A step of the propagation of the multipliers: `L * U` (`R === nothing`) or `U * R`
+# (`L === nothing`) without gradients, and `U * R` with the gradients `L * ∂U * R`
+# (`compute_right`). The results are computed into `buf` for the in-place computation
+# when supported by the step (`buf` is not used otherwise).
+@inline function _mul_step(buf, step::AbstractStep{OP}, L, R, ::Val{inplace}) where {OP,inplace}
+    dummy_grad = SVector{0,OP}()
+    if inplace && support_inplace_compute(typeof(step))
+        compute!(buf, step, dummy_grad, L, R)
+        return buf
+    end
+    return compute(step, dummy_grad, L, R)
+end
+@inline function _right_step(buf, step, grad, L, R, gradR, ::Val{inplace}) where inplace
+    if inplace && support_inplace_compute(typeof(step))
+        compute_right!(buf, step, grad, L, R, gradR)
+        return buf
+    end
+    return compute_right(step, grad, L, R, gradR)
 end
 
 macro pick_mul(mul!, mul, out, a, b)
@@ -362,47 +582,52 @@ macro pick_mulass(mul!, mul, out, a, b)
       v)
 end
 
-@inline function _eval_grads(s::Sequence{OP,NSteps,Steps,NParams}, grads, mul, mul!, first_val, last_val) where {OP,NSteps,Steps,NParams}
-    @assert length(grads) == NParams
+@inline function _eval_grads(s::Sequence, grads, mul, mul!, first_val, last_val)
+    NSteps = _nsteps(s)
+    @assert length(grads) == nparams(s)
+    prefix_buf = s.prefix_buf
+    suffix_buf = s.suffix_buf
+    grad_buf = s.grad_buf
     prev = last_val
     @inbounds for i in NSteps - 2:-1:1
-        prev = @pick_mulass(mul!, mul, s.suffix_buf[i], s.val_buf[i + 1], prev)
+        prev = @pick_mulass(mul!, mul, suffix_buf[i], s.val_buf[i + 1], prev)
     end
     tmp2 = NSteps > 2 && mul! !== nothing ? @inbounds(s.tmp_buf[2]) : nothing
-    starts, ends = _param_range(typeof(s))
-    @inbounds for step_idx in 1:NSteps
-        pstart = starts[step_idx]
-        pend = ends[step_idx]
-        if step_idx == 1
-            suffix = step_idx == NSteps - 1 ? last_val : s.suffix_buf[step_idx]
-            for param_idx in pstart:pend
-                @pick_mulass(mul!, mul, grads[param_idx], s.grad_buf[param_idx], suffix)
+    _fold_steps(nothing, s, Val(false)) do _, _, step_idx, prange, pos
+        isfirst, islast = _pos(pos)
+        @inbounds if isfirst
+            suffix = step_idx == NSteps - 1 ? last_val : suffix_buf[step_idx]
+            for param_idx in prange
+                @pick_mulass(mul!, mul, grads[param_idx], grad_buf[param_idx], suffix)
             end
-        elseif step_idx == NSteps
-            prefix = step_idx == 2 ? first_val : s.prefix_buf[step_idx - 2]
-            for param_idx in pstart:pend
-                @pick_mulass(mul!, mul, grads[param_idx], prefix, s.grad_buf[param_idx])
+        elseif islast
+            prefix = step_idx == 2 ? first_val : prefix_buf[step_idx - 2]
+            for param_idx in prange
+                @pick_mulass(mul!, mul, grads[param_idx], prefix, grad_buf[param_idx])
             end
         else
-            prefix = step_idx == 2 ? first_val : s.prefix_buf[step_idx - 2]
-            suffix = step_idx == NSteps - 1 ? last_val : s.suffix_buf[step_idx]
-            for param_idx in pstart:pend
-                tmp = @pick_mul(mul!, mul, tmp2, prefix, s.grad_buf[param_idx])
+            prefix = step_idx == 2 ? first_val : prefix_buf[step_idx - 2]
+            suffix = step_idx == NSteps - 1 ? last_val : suffix_buf[step_idx]
+            for param_idx in prange
+                tmp = @pick_mul(mul!, mul, tmp2, prefix, grad_buf[param_idx])
                 @pick_mulass(mul!, mul, grads[param_idx], tmp, suffix)
             end
         end
+        return
     end
     return
 end
 
-function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,Steps,NParams}
+function compute(s::Sequence, grads)
+    NSteps = _nsteps(s)
     if NSteps == 1
-        return compute(s.steps[1], grads)
+        return compute(_first_step(s), grads)
     end
+    _full_buffers!(s)
     mul = s.mul
     mul! = s.mul!
     has_grad = !isempty(grads)
-    @inline _eval_compute(s, grads, has_grad)
+    @inline _eval_compute(s, has_grad)
     first_val = @inbounds s.val_buf[1]
     last_val = @inbounds s.val_buf[NSteps]
 
@@ -417,91 +642,37 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,S
 end
 
 # Computation with both left and right multipliers. Without gradients:
-#   suffixes  S_j = U_j * S_(j+1)  (S_(N+1) = R)  for j = N, ..., 2,   result L * U_1 * S_2
+#   suffixes  S_j = U_j * S_(j+1)  (S_(N+1) = R)  for j = N, ..., 1,   result L * S_1
 # With gradients, each step is called at most twice and the last step once:
 #   forward   P_(j+1) = P_j * U_j  (P_1 = L)      for j = 1, ..., N-1  (no gradients)
 #   backward  S_j = U_j * S_(j+1) with the gradients P_j * ∂U_j * S_(j+1) (`compute_right`)
 #                                                  for j = N, ..., 1
 #   result    L * S_1
 # Only thin products (with a multiplier on each side) are formed by the sequence itself.
-function __lr_body_nograd(NSteps, inplace)
-    body = Any[:nothing, :(S = R)]
-    for j in NSteps:-1:2
-        sbuf = isodd(j) ? :suf1 : :suf2
-        push!(body, inplace ? quote
-            if support_inplace_compute(typeof(steps[$j]))
-                compute!($sbuf, steps[$j], dummy_grad, nothing, S)
-                S = $sbuf
-            else
-                S = compute(steps[$j], dummy_grad, nothing, S)
-            end
-        end : :(S = compute(steps[$j], dummy_grad, nothing, S)))
-    end
-    push!(body, inplace ? quote
-        if support_inplace_compute(typeof(steps[1]))
-            compute!(prefix[2], steps[1], dummy_grad, L, nothing)
-            P = prefix[2]
-        else
-            P = compute(steps[1], dummy_grad, L, nothing)
+function _compute_lr!(res, s::Sequence, grads, L, R, prefix, suf1, suf2, gradR,
+                      ::Val{inplace}, ::Val{has_grad}) where {inplace,has_grad}
+    ip = Val(inplace)
+    sbuf(j) = isodd(j) ? suf1 : suf2
+    if has_grad
+        _fold_steps(L, s, Val(false)) do P, step, j, _, pos
+            _, islast = _pos(pos)
+            islast && return P
+            P = _mul_step(inplace ? @inbounds(prefix[j + 1]) : nothing, step, P, nothing, ip)
+            @inbounds prefix[j + 1] = P
+            return P
         end
-        mul!(res, P, S)
-    end : quote
-        P = compute(steps[1], dummy_grad, L, nothing)
-        res = mul(P, S)
-    end)
-    return body
-end
-
-function __lr_body_grad(starts, ends, NSteps, inplace)
-    body = Any[:nothing, :(P = L)]
-    for j in 1:NSteps - 1
-        push!(body, inplace ? quote
-            if support_inplace_compute(typeof(steps[$j]))
-                compute!(prefix[$(j + 1)], steps[$j], dummy_grad, P, nothing)
-                P = prefix[$(j + 1)]
-            else
-                P = compute(steps[$j], dummy_grad, P, nothing)
-                prefix[$(j + 1)] = P
-            end
-        end : quote
-            P = compute(steps[$j], dummy_grad, P, nothing)
-            prefix[$(j + 1)] = P
-        end)
-    end
-    push!(body, :(S = R))
-    for j in NSteps:-1:1
-        Pj = j == 1 ? :L : :(prefix[$j])
-        gj = :(@view(grads[$(starts[j]):$(ends[j])]))
-        sbuf = isodd(j) ? :suf1 : :suf2
-        grj = :(@view(gradR[$(starts[j]):$(ends[j])]))
-        push!(body, inplace ? quote
-            if support_inplace_compute(typeof(steps[$j]))
-                compute_right!($sbuf, steps[$j], $gj, $Pj, S, $grj)
-                S = $sbuf
-            else
-                S = compute_right(steps[$j], $gj, $Pj, S, $grj)
-            end
-        end : :(S = compute_right(steps[$j], $gj, $Pj, S, $grj)))
-    end
-    push!(body, inplace ? :(mul!(res, L, S)) : :(res = mul(L, S)))
-    return body
-end
-
-@generated function _compute_lr!(res, s::Sequence{OP,NSteps}, grads, L, R, prefix, suf1, suf2,
-                                 gradR, ::Val{inplace}, ::Val{has_grad}) where {OP,NSteps,inplace,has_grad}
-    starts, ends = _param_range(s)
-    body = has_grad ? __lr_body_grad(starts, ends, NSteps, inplace) :
-        __lr_body_nograd(NSteps, inplace)
-    return quote
-        steps = s.steps
-        mul = s.mul
-        mul! = s.mul!
-        dummy_grad = SVector{0,OP}()
-        @inbounds begin
-            $(body...)
+        S1 = _fold_steps(R, s, Val(true)) do S, step, j, prange, pos
+            isfirst, _ = _pos(pos)
+            Pj = isfirst ? L : @inbounds(prefix[j])
+            return _right_step(sbuf(j), step, @inbounds(@view(grads[prange])), Pj, S,
+                               @inbounds(@view(gradR[prange])), ip)
         end
-        return res
+    else
+        S1 = _fold_steps(R, s, Val(true)) do S, step, j, _, _
+            _mul_step(sbuf(j), step, nothing, S, ip)
+        end
     end
+    return inplace ? mul!(res, L, S1) : s.mul(L, S1)
 end
 
 # Products with a single multiplier
@@ -551,18 +722,20 @@ With in-place multiplication, the sequence must be constructed with the prototyp
 `left`/`right` of the multipliers that are used (see [`Sequence`](@ref)), and the
 allocating version returns an internal buffer.
 """
-function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads, L, R) where {OP,NSteps,Steps,NParams}
+function compute(s::Sequence{OP}, grads, L, R) where OP
     if L === nothing && R === nothing
         return compute(s, grads)
     end
+    NSteps = _nsteps(s)
     if NSteps == 1
-        return compute(s.steps[1], grads, L, R)
+        return compute(_first_step(s), grads, L, R)
     end
     if s.mul! !== nothing
         lr = _lr_buffers(s, L, R)
         return compute!(lr.res, s, grads, L, R)
     end
     has_grad = !isempty(grads)
+    NParams = nparams(s)
     has_grad && @assert length(grads) == NParams
     if L === nothing || R === nothing
         # Full operator and gradients, then multiplied
@@ -588,18 +761,18 @@ function compute(s::Sequence{OP,NSteps,Steps,NParams}, grads, L, R) where {OP,NS
                         Val(false), Val(false))
 end
 
-function compute!(res, s::Sequence{OP,NSteps,Steps,NParams}, grads, L, R) where {OP,NSteps,Steps,NParams}
+function compute!(res, s::Sequence, grads, L, R)
     if L === nothing && R === nothing
         return compute!(res, s, grads)
     end
-    if NSteps == 1
-        return compute!(res, s.steps[1], grads, L, R)
+    if _nsteps(s) == 1
+        return compute!(res, _first_step(s), grads, L, R)
     end
     if s.mul! === nothing
         throw(ArgumentError("In-place compute with left/right multipliers requires in-place multiplication (`mul!`)"))
     end
     if !isempty(grads)
-        @assert length(grads) == NParams
+        @assert length(grads) == nparams(s)
     end
     return _compute_lr_buffered!(res, s, grads, L, R, _lr_buffers(s, L, R))
 end
@@ -630,15 +803,17 @@ function _compute_lr_buffered!(res, s::Sequence, grads, L, R, fb::_LRFullBuffers
     return res
 end
 
-function compute!(res::OP, s::Sequence{OP,NSteps,Steps,NParams}, grads) where {OP,NSteps,Steps,NParams}
+function compute!(res::OP, s::Sequence{OP}, grads) where OP
+    NSteps = _nsteps(s)
     if NSteps == 1
-        compute!(res, s.steps[1], grads)
+        compute!(res, _first_step(s), grads)
         return res
     end
+    _full_buffers!(s)
     mul! = s.mul!
     @assert mul! !== nothing
     has_grad = !isempty(grads)
-    @inline _eval_compute(s, grads, has_grad)
+    @inline _eval_compute(s, has_grad)
     first_val = @inbounds s.val_buf[1]
     last_val = @inbounds s.val_buf[NSteps]
 
